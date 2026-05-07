@@ -3,6 +3,7 @@ set -Eeuo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export PROJECT_DIR
+DEMO_VERSION="$(cat "$PROJECT_DIR/VERSION" 2>/dev/null || printf 'dev')"
 
 # shellcheck source=lib/common.sh
 . "$PROJECT_DIR/lib/common.sh"
@@ -14,6 +15,7 @@ show_menu() {
   cat <<'MENU'
 
 demo-autoconfig
+version: VERSION_PLACEHOLDER
 1. Initial setup
 2. Module 1
 3. Module 2
@@ -35,7 +37,7 @@ run_module() {
 }
 
 while true; do
-  show_menu
+  show_menu | sed "s/VERSION_PLACEHOLDER/$DEMO_VERSION/"
   read -r -p "Select action: " choice
   case "$choice" in
     1) run_module initial_setup.sh ;;
