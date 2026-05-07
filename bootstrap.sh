@@ -32,11 +32,21 @@ download_project() {
 
   status OK "Downloading project archive from $ARCHIVE_URL"
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "$ARCHIVE_URL" -o "$archive"
+    if ! curl -fsSL "$ARCHIVE_URL" -o "$archive"; then
+      status ERROR "Download failed with curl. Check internet, DNS, TLS certificates, proxy, or use offline copy."
+      exit 1
+    fi
   elif command -v wget >/dev/null 2>&1; then
-    wget -qO "$archive" "$ARCHIVE_URL"
+    if ! wget -qO "$archive" "$ARCHIVE_URL"; then
+      status ERROR "Download failed with wget. Check internet, DNS, TLS certificates, proxy, or use offline copy."
+      exit 1
+    fi
   else
     status ERROR "Neither curl nor wget is installed."
+    exit 1
+  fi
+  if [ ! -s "$archive" ]; then
+    status ERROR "Downloaded archive is empty: $archive"
     exit 1
   fi
   tar -xzf "$archive" -C "$extract"

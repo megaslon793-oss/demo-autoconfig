@@ -144,7 +144,10 @@ save_iptables_rules() {
 
 configure_nat() {
   [ "${NAT_ENABLE:-no}" = "yes" ] || { log_skip "NAT disabled by config"; return 0; }
-  [ -x /usr/sbin/iptables ] || { log_error "/usr/sbin/iptables not found"; return 1; }
+  if [ ! -x /usr/sbin/iptables ]; then
+    install_packages iptables iptables-persistent || true
+  fi
+  [ -x /usr/sbin/iptables ] || { log_error "/usr/sbin/iptables not found. Install package: iptables"; return 1; }
   if [ -z "${NAT_OUT_IFACE:-}" ] || [ -z "${NAT_LAN_CIDRS:-}" ]; then
     log_warn "NAT_OUT_IFACE or NAT_LAN_CIDRS is empty. NAT skipped."
     return 0

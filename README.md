@@ -6,17 +6,23 @@
 
 ## Быстрый запуск
 
-После публикации репозитория замените `USER/REPO` в `bootstrap.sh` или передайте URL архива явно:
+Запуск с GitHub:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/USER/REPO/main/bootstrap.sh | bash
+curl -fsSL https://raw.githubusercontent.com/megaslon793-oss/demo-autoconfig/main/bootstrap.sh | sudo bash
 ```
 
-Вариант без редактирования `bootstrap.sh`:
+Если `curl` не установлен:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/USER/REPO/main/bootstrap.sh | \
-  DEMO_REPO_ARCHIVE_URL=https://github.com/USER/REPO/archive/refs/heads/main.tar.gz bash
+wget -qO- https://raw.githubusercontent.com/megaslon793-oss/demo-autoconfig/main/bootstrap.sh | sudo bash
+```
+
+Если нужно временно указать другой репозиторий:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/megaslon793-oss/demo-autoconfig/main/bootstrap.sh | \
+  sudo env DEMO_REPO_ARCHIVE_URL=https://github.com/USER/REPO/archive/refs/heads/main.tar.gz bash
 ```
 
 ## Меню

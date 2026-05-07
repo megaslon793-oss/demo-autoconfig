@@ -19,6 +19,8 @@ LOG_FILE="/var/log/demo-autoconfig.log"
 . "$PROJECT_DIR/lib/packages.sh"
 # shellcheck source=lib/network.sh
 . "$PROJECT_DIR/lib/network.sh"
+# shellcheck source=lib/scenarios.sh
+. "$PROJECT_DIR/lib/scenarios.sh"
 # shellcheck source=lib/cleanup.sh
 . "$PROJECT_DIR/lib/cleanup.sh"
 

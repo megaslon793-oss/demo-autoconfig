@@ -21,6 +21,8 @@ demo-autoconfig
 5. Diagnostics
 6. Cleanup temporary files
 0. Exit
+
+Quick scenarios: ISP, HQ-RTR, BR-RTR
 MENU
 }
 
@@ -42,6 +44,9 @@ while true; do
     4) run_module module3.sh ;;
     5) run_module diagnostics.sh ;;
     6) cleanup_temporary_files ;;
+    ISP|isp) export ROLE_SCENARIO="ISP"; run_module role_scenario.sh; unset ROLE_SCENARIO ;;
+    HQ-RTR|hq-rtr) export ROLE_SCENARIO="HQ-RTR"; run_module role_scenario.sh; unset ROLE_SCENARIO ;;
+    BR-RTR|br-rtr) export ROLE_SCENARIO="BR-RTR"; run_module role_scenario.sh; unset ROLE_SCENARIO ;;
     0) log_ok "Exit"; exit 0 ;;
     *) log_warn "Unknown option: $choice" ;;
   esac
