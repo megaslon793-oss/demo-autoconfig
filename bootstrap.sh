@@ -5,7 +5,7 @@ PROJECT_NAME="demo-autoconfig"
 TMP_ROOT="/tmp/demo-autoconfig"
 LOG_FILE="/var/log/demo-autoconfig.log"
 
-DEFAULT_ARCHIVE_URL="https://github.com/USER/REPO/archive/refs/heads/main.tar.gz"
+DEFAULT_ARCHIVE_URL="https://github.com/megaslon793-oss/demo-autoconfig/archive/refs/heads/main.tar.gz"
 ARCHIVE_URL="${DEMO_REPO_ARCHIVE_URL:-$DEFAULT_ARCHIVE_URL}"
 
 status() {
@@ -30,13 +30,15 @@ download_project() {
   rm -rf "$extract"
   mkdir -p "$extract"
 
-  if [ "$ARCHIVE_URL" = "$DEFAULT_ARCHIVE_URL" ]; then
-    status WARN "DEMO_REPO_ARCHIVE_URL is not set. Edit bootstrap.sh after publishing to GitHub, or run:"
-    status WARN "DEMO_REPO_ARCHIVE_URL=https://github.com/USER/REPO/archive/refs/heads/main.tar.gz bash bootstrap.sh"
-  fi
-
   status OK "Downloading project archive from $ARCHIVE_URL"
-  curl -fsSL "$ARCHIVE_URL" -o "$archive"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$ARCHIVE_URL" -o "$archive"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$archive" "$ARCHIVE_URL"
+  else
+    status ERROR "Neither curl nor wget is installed."
+    exit 1
+  fi
   tar -xzf "$archive" -C "$extract"
 
   local project_dir
