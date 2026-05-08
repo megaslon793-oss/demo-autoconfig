@@ -11,6 +11,10 @@ ensure_dirs
 load_config
 
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-P@ssw0rd}"
+DOCKER_DB_NAME="${DOCKER_DB_NAME:-testdb}"
+DOCKER_DB_USER="${DOCKER_DB_USER:-test}"
+DOCKER_DB_PASSWORD="${DOCKER_DB_PASSWORD:-$ADMIN_PASSWORD}"
+DOCKER_DB_ROOT_PASSWORD="${DOCKER_DB_ROOT_PASSWORD:-root$ADMIN_PASSWORD}"
 DOMAIN_LOWER="${DOMAIN:-au-team.irpo}"
 REALM_UPPER="${REALM_UPPER:-$(printf '%s' "$DOMAIN_LOWER" | tr '[:lower:]' '[:upper:]')}"
 SAMBA_DOMAIN="${SAMBA_DOMAIN:-AU-TEAM}"
@@ -28,9 +32,12 @@ SSH_SERVER_PORT="${SSH_SERVER_PORT:-2026}"
 SSH_ROUTER_USER="${SSH_ROUTER_USER:-net_admin}"
 SSH_ROUTER_PASSWORD="${SSH_ROUTER_PASSWORD:-$ADMIN_PASSWORD}"
 SSH_ROUTER_PORT="${SSH_ROUTER_PORT:-2026}"
+HQ_CLI_ANSIBLE_USER="${HQ_CLI_ANSIBLE_USER:-user}"
+HQ_CLI_ANSIBLE_PASSWORD="${HQ_CLI_ANSIBLE_PASSWORD:-}"
 NFS_DIR="${NFS_DIR:-/raid/nfs}"
 NTP_SERVER_IP="${NTP_SERVER_IP:-172.16.1.1}"
 ISO_DIR="${ISO_MOUNTPOINT:-/mnt/additional}"
+YANDEX_BROWSER_ENABLE="${YANDEX_BROWSER_ENABLE:-yes}"
 
 run_if_needed() {
   local title="$1"
@@ -60,6 +67,22 @@ ensure_sudoers_file() {
   if command_exists visudo; then
     visudo -cf "$file" >/dev/null
   fi
+}
+
+sed_replacement_escape() {
+  printf '%s' "$1" | sed 's/[\\\/&]/\\&/g'
+}
+
+php_double_quoted_escape() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\$/\\$/g'
+}
+
+sql_literal_escape() {
+  printf '%s' "$1" | sed "s/'/''/g"
+}
+
+sql_identifier_escape() {
+  printf '%s' "$1" | sed 's/`/``/g'
 }
 
 service_restart_enable() {
@@ -151,8 +174,8 @@ EOF
 setup_isp_proxy() {
   install_packages nginx apache2-utils
   htpasswd -bc /etc/nginx/.htpasswd WEB "$ADMIN_PASSWORD"
-  backup_file /etc/nginx/sites-available/web.conf
-  cat > /etc/nginx/sites-available/web.conf <<EOF
+  backup_file /etc/nginx/sites-available/reverse_proxy.conf
+  cat > /etc/nginx/sites-available/reverse_proxy.conf <<EOF
 server {
     listen 80;
     server_name web.$DOMAIN_LOWER;
@@ -167,9 +190,7 @@ server {
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
     }
 }
-EOF
-  backup_file /etc/nginx/sites-available/docker.conf
-  cat > /etc/nginx/sites-available/docker.conf <<EOF
+
 server {
     listen 80;
     server_name docker.$DOMAIN_LOWER;
@@ -182,8 +203,8 @@ server {
     }
 }
 EOF
-  ln -sf /etc/nginx/sites-available/web.conf /etc/nginx/sites-enabled/web.conf
-  ln -sf /etc/nginx/sites-available/docker.conf /etc/nginx/sites-enabled/docker.conf
+  ln -sf /etc/nginx/sites-available/reverse_proxy.conf /etc/nginx/sites-enabled/reverse_proxy.conf
+  rm -f /etc/nginx/sites-enabled/web.conf /etc/nginx/sites-enabled/docker.conf
   rm -f /etc/nginx/sites-enabled/default
   nginx -t
   service_restart_enable nginx
@@ -195,9 +216,11 @@ setup_router_dnat() {
   ensure_iptables_available
   ensure_iptables_rule nat PREROUTING -d "$wan_ip" -p tcp --dport 8080 -j DNAT --to-destination "$dest:8080"
   ensure_iptables_rule nat PREROUTING -d "$wan_ip" -p udp --dport 8080 -j DNAT --to-destination "$dest:8080"
+  ensure_iptables_rule nat PREROUTING -d "$wan_ip" -p tcp --dport 80 -j DNAT --to-destination "$dest:80"
   ensure_iptables_rule nat PREROUTING -d "$wan_ip" -p tcp --dport 2026 -j DNAT --to-destination "$dest:2026"
   ensure_iptables_rule filter FORWARD -p tcp -d "$dest" --dport 8080 -j ACCEPT
   ensure_iptables_rule filter FORWARD -p udp -d "$dest" --dport 8080 -j ACCEPT
+  ensure_iptables_rule filter FORWARD -p tcp -d "$dest" --dport 80 -j ACCEPT
   ensure_iptables_rule filter FORWARD -p tcp -d "$dest" --dport 2026 -j ACCEPT
   save_iptables_rules
 }
@@ -212,6 +235,7 @@ setup_bind_ad_records() {
   ensure_line "$zone_file" "_kpasswd._tcp IN SRV 0 100 464 br-srv.$DOMAIN_LOWER."
   ensure_line "$zone_file" "_kpasswd._udp IN SRV 0 100 464 br-srv.$DOMAIN_LOWER."
   ensure_line "$zone_file" "_gc._tcp IN SRV 0 100 3268 br-srv.$DOMAIN_LOWER."
+  ensure_line "$zone_file" "_ldap._tcp.dc._msdcs IN SRV 0 100 389 br-srv.$DOMAIN_LOWER."
   ensure_line "$zone_file" "_kerberos IN TXT \"$REALM_UPPER\""
   if command_exists named-checkzone; then
     named-checkzone "$DOMAIN_LOWER" "$zone_file"
@@ -286,9 +310,13 @@ sql_root() {
 setup_hq_web() {
   install_packages apache2 mariadb-server php php-mysql php-cli php-gd
   service_restart_enable mariadb
+  local admin_sql_password
+  admin_sql_password="$(sql_literal_escape "$ADMIN_PASSWORD")"
   sql_root "CREATE DATABASE IF NOT EXISTS webdb;"
-  sql_root "CREATE USER IF NOT EXISTS 'web'@'localhost' IDENTIFIED BY '$ADMIN_PASSWORD';"
+  sql_root "CREATE USER IF NOT EXISTS 'web'@'localhost' IDENTIFIED BY '$admin_sql_password';"
   sql_root "GRANT ALL PRIVILEGES ON webdb.* TO 'web'@'localhost'; FLUSH PRIVILEGES;"
+  sql_root "CREATE USER IF NOT EXISTS 'user'@'localhost' IDENTIFIED BY '$admin_sql_password';"
+  sql_root "GRANT ALL PRIVILEGES ON webdb.* TO 'user'@'localhost'; FLUSH PRIVILEGES;"
   if prepare_iso_mount && [ -d "$ISO_DIR/web" ]; then
     [ -f "$ISO_DIR/web/dump.sql" ] && { mariadb -u root webdb < "$ISO_DIR/web/dump.sql" || mysql -u root webdb < "$ISO_DIR/web/dump.sql" || true; }
     [ -f "$ISO_DIR/web/index.php" ] && cp "$ISO_DIR/web/index.php" /var/www/html/index.php
@@ -296,7 +324,10 @@ setup_hq_web() {
     [ -f "$ISO_DIR/web/logo.png" ] && cp "$ISO_DIR/web/logo.png" /var/www/html/images/logo.png
   fi
   if [ -f /var/www/html/index.php ]; then
-    sed -i 's/$password *= *"[^"]*"/$password = "P@ssw0rd"/' /var/www/html/index.php || true
+    local web_password
+    web_password="$(php_double_quoted_escape "$ADMIN_PASSWORD")"
+    web_password="$(sed_replacement_escape "$web_password")"
+    sed -i "s/\\\$password *= *\"[^\"]*\"/\\\$password = \"$web_password\"/" /var/www/html/index.php || true
     sed -i 's/$dbname *= *"[^"]*"/$dbname = "webdb"/' /var/www/html/index.php || true
   fi
   rm -f /var/www/html/index.html
@@ -328,6 +359,8 @@ setup_samba_dc() {
   systemctl disable --now smbd nmbd winbind 2>/dev/null || true
   enable_service samba-ad-dc
   restart_service samba-ad-dc
+  samba-tool user show user1 >/dev/null 2>&1 || samba-tool user create user1 "$ADMIN_PASSWORD"
+  samba-tool group addmembers "Domain Admins" user1 2>/dev/null || true
   for user in hquser1 hquser2 hquser3 hquser4 hquser5; do
     samba-tool user show "$user" >/dev/null 2>&1 || samba-tool user create "$user" "$ADMIN_PASSWORD"
   done
@@ -340,11 +373,14 @@ setup_samba_dc() {
 setup_ansible_br_srv() {
   install_packages ansible sshpass
   mkdir -p /etc/ansible
+  local hq_cli_inventory
+  hq_cli_inventory="hq-cli ansible_host=$HQ_CLI_IP ansible_port=22 ansible_user=$HQ_CLI_ANSIBLE_USER ansible_become=false"
+  [ -n "$HQ_CLI_ANSIBLE_PASSWORD" ] && hq_cli_inventory="$hq_cli_inventory ansible_password=$HQ_CLI_ANSIBLE_PASSWORD"
   backup_file /etc/ansible/hosts
   cat > /etc/ansible/hosts <<EOF
 [servers]
 hq-srv ansible_host=$HQ_SRV_IP ansible_port=$SSH_SERVER_PORT ansible_user=$SSH_SERVER_USER ansible_password=$SSH_SERVER_PASSWORD
-hq-cli ansible_host=$HQ_CLI_IP ansible_port=22 ansible_user=user ansible_password=root ansible_become=false
+$hq_cli_inventory
 
 [routers]
 hq-rtr ansible_host=$HQ_RTR_HQ_IP ansible_port=$SSH_ROUTER_PORT ansible_user=$SSH_ROUTER_USER ansible_password=$SSH_ROUTER_PASSWORD
@@ -380,15 +416,69 @@ docker_compose_up() {
   fi
 }
 
+docker_compose_down_reset() {
+  if docker compose version >/dev/null 2>&1; then
+    docker compose down -v --remove-orphans
+  else
+    docker-compose down -v --remove-orphans
+  fi
+}
+
+retag_docker_image_if_needed() {
+  local desired="$1"
+  local fallback="$2"
+  if docker image inspect "$desired" >/dev/null 2>&1; then
+    return 0
+  fi
+  if docker image inspect "$fallback" >/dev/null 2>&1; then
+    docker tag "$fallback" "$desired"
+  fi
+}
+
+ensure_docker_database() {
+  local auth=()
+  local db_name db_user db_password
+  db_name="$(sql_identifier_escape "$DOCKER_DB_NAME")"
+  db_user="$(sql_literal_escape "$DOCKER_DB_USER")"
+  db_password="$(sql_literal_escape "$DOCKER_DB_PASSWORD")"
+
+  for _ in $(seq 1 24); do
+    if docker exec db mariadb -uroot -p"$DOCKER_DB_ROOT_PASSWORD" -e "SELECT 1;" >/dev/null 2>&1; then
+      auth=(-uroot -p"$DOCKER_DB_ROOT_PASSWORD")
+      break
+    fi
+    if docker exec db mariadb -uroot -e "SELECT 1;" >/dev/null 2>&1; then
+      auth=(-uroot)
+      break
+    fi
+    sleep 5
+  done
+
+  if [ "${#auth[@]}" -eq 0 ]; then
+    log_warn "Could not authenticate to MariaDB container to verify application database"
+    return 0
+  fi
+
+  docker exec db mariadb "${auth[@]}" -e "CREATE DATABASE IF NOT EXISTS \`$db_name\`;"
+  docker exec db mariadb "${auth[@]}" -e "CREATE USER IF NOT EXISTS '$db_user'@'%' IDENTIFIED BY '$db_password';"
+  docker exec db mariadb "${auth[@]}" -e "ALTER USER '$db_user'@'%' IDENTIFIED BY '$db_password';"
+  docker exec db mariadb "${auth[@]}" -e "GRANT ALL PRIVILEGES ON \`$db_name\`.* TO '$db_user'@'%'; FLUSH PRIVILEGES;"
+}
+
 setup_docker_app_br_srv() {
-  install_packages docker.io docker-compose
+  install_packages docker.io docker-compose curl
   service_restart_enable docker
   prepare_iso_mount || return 1
   [ -f "$ISO_DIR/docker/mariadb_latest.tar" ] && docker load -i "$ISO_DIR/docker/mariadb_latest.tar"
   [ -f "$ISO_DIR/docker/site_latest.tar" ] && docker load -i "$ISO_DIR/docker/site_latest.tar"
+  retag_docker_image_if_needed mariadb:10.11 mariadb:latest
   mkdir -p /opt/testapp
+  local reset_volume="no"
+  if [ -f /opt/testapp/docker-compose.yml ] && { ! grep -q "DB_USER: \"$DOCKER_DB_USER\"" /opt/testapp/docker-compose.yml || ! grep -q "DB_PASS: \"$DOCKER_DB_PASSWORD\"" /opt/testapp/docker-compose.yml || ! grep -q "MARIADB_ROOT_PASSWORD: \"$DOCKER_DB_ROOT_PASSWORD\"" /opt/testapp/docker-compose.yml; }; then
+    reset_volume="yes"
+  fi
   backup_file /opt/testapp/docker-compose.yml
-  cat > /opt/testapp/docker-compose.yml <<'EOF'
+  cat > /opt/testapp/docker-compose.yml <<EOF
 version: '3.8'
 services:
   database:
@@ -398,10 +488,10 @@ services:
     ports:
       - "3306:3306"
     environment:
-      MARIADB_DATABASE: "testdb"
-      MARIADB_USER: "testc"
-      MARIADB_PASSWORD: "P@sswOrd"
-      MARIADB_ROOT_PASSWORD: "root"
+      MARIADB_DATABASE: "$DOCKER_DB_NAME"
+      MARIADB_USER: "$DOCKER_DB_USER"
+      MARIADB_PASSWORD: "$DOCKER_DB_PASSWORD"
+      MARIADB_ROOT_PASSWORD: "$DOCKER_DB_ROOT_PASSWORD"
     volumes:
       - db_data:/var/lib/mysql
 
@@ -415,45 +505,99 @@ services:
       DB_TYPE: "maria"
       DB_HOST: "database"
       DB_PORT: "3306"
-      DB_NAME: "testdb"
-      DB_USER: "testc"
-      DB_PASS: "P@sswOrd"
+      DB_NAME: "$DOCKER_DB_NAME"
+      DB_USER: "$DOCKER_DB_USER"
+      DB_PASS: "$DOCKER_DB_PASSWORD"
+      SERVER_PORT: "8080"
     depends_on:
       - database
 volumes:
   db_data:
 EOF
   cd /opt/testapp
+  if [ "$reset_volume" = "yes" ]; then
+    log_warn "Docker compose DB settings changed; resetting old testapp volume"
+    docker_compose_down_reset || true
+  fi
   docker_compose_up
+  ensure_docker_database || true
+  docker restart testapp >/dev/null 2>&1 || true
+  local ok=0
+  for _ in $(seq 1 24); do
+    if curl -fsS http://127.0.0.1:8080 >/dev/null 2>&1; then
+      ok=1
+      break
+    fi
+    sleep 5
+  done
+  [ "$ok" -eq 1 ] || log_warn "Docker app did not answer on http://127.0.0.1:8080 yet"
+}
+
+configure_hq_domain_sudoers() {
+  local file="/etc/sudoers.d/hq"
+  local commands="/usr/bin/cat, /usr/bin/grep, /usr/bin/id"
+  local gid=""
+  gid="$(getent group "hq@$DOMAIN_LOWER" 2>/dev/null | cut -d: -f3 || true)"
+  [ -n "$gid" ] || gid="$(getent group hq 2>/dev/null | cut -d: -f3 || true)"
+  {
+    printf '%%hq ALL=(ALL:ALL) NOPASSWD: %s\n' "$commands"
+    [ -n "$gid" ] && printf '%%#%s ALL=(ALL:ALL) NOPASSWD: %s\n' "$gid" "$commands"
+  } > "$file"
+  chmod 440 "$file"
+  if command_exists visudo; then
+    visudo -cf "$file" >/dev/null
+  fi
+}
+
+setup_yandex_browser_client() {
+  [ "${YANDEX_BROWSER_ENABLE:-yes}" = "yes" ] || { log_skip "Yandex Browser disabled"; return 0; }
+  install_packages curl gnupg ca-certificates
+  mkdir -p /usr/share/keyrings "$TMP_DIR"
+  local key_tmp="$TMP_DIR/yandex-browser-key.gpg"
+  rm -f /usr/share/keyrings/yandex-browser.gpg
+  if curl -fsSL -o "$key_tmp" https://repo.yandex.ru/yandex-browser/YANDEX-BROWSER-KEY.GPG \
+    && gpg --batch --yes --dearmor -o /usr/share/keyrings/yandex-browser.gpg "$key_tmp"; then
+    echo "deb [signed-by=/usr/share/keyrings/yandex-browser.gpg] https://repo.yandex.ru/yandex-browser/deb stable main" > /etc/apt/sources.list.d/yandex-browser.list
+    apt_get_retry update || true
+    install_packages yandex-browser-stable || log_warn "Yandex Browser package was not installed"
+  else
+    log_warn "Could not fetch Yandex Browser repository key"
+  fi
+  rm -f "$key_tmp"
 }
 
 setup_hq_cli_domain_nfs() {
   setup_chrony_client
   write_krb5_conf
-  install_packages realmd sssd sssd-tools adcli samba-common packagekit krb5-user nfs-common
+  printf 'krb5-config krb5-config/default_realm string %s\n' "$REALM_UPPER" | debconf-set-selections 2>/dev/null || true
+  printf 'krb5-config krb5-config/kerberos_servers string br-srv.%s\n' "$DOMAIN_LOWER" | debconf-set-selections 2>/dev/null || true
+  printf 'krb5-config krb5-config/admin_server string br-srv.%s\n' "$DOMAIN_LOWER" | debconf-set-selections 2>/dev/null || true
+  install_packages realmd sssd sssd-tools libnss-sss libpam-sss adcli samba-common-bin packagekit krb5-user nfs-common oddjob oddjob-mkhomedir
   echo "$ADMIN_PASSWORD" | realm join -U Administrator "$DOMAIN_LOWER" || log_warn "realm join failed or already joined"
-  ensure_sudoers_file /etc/sudoers.d/hq "%hq ALL=(ALL:ALL) NOPASSWD: /usr/bin/cat, /usr/bin/grep, /usr/bin/id"
+  configure_hq_domain_sudoers
+  pam-auth-update --enable mkhomedir --force 2>/dev/null || true
   mkdir -p /mnt/nfs
   mountpoint -q /mnt/nfs || mount "$HQ_SRV_IP:/raid/nfs" /mnt/nfs || log_warn "NFS mount failed; fstab still configured"
   ensure_line /etc/fstab "$HQ_SRV_IP:/raid/nfs /mnt/nfs nfs defaults,_netdev 0 0"
+  setup_yandex_browser_client
 }
 
 case "$ROLE" in
   ISP)
     run_if_needed "ISP chrony server" "systemctl is-active --quiet chrony" setup_chrony_server
-    run_if_needed "ISP nginx reverse proxy" "systemctl is-active --quiet nginx && grep -q 'server_name web.$DOMAIN_LOWER;' /etc/nginx/sites-available/web.conf 2>/dev/null" setup_isp_proxy
+    run_if_needed "ISP nginx reverse proxy" "systemctl is-active --quiet nginx && grep -q 'server_name web.$DOMAIN_LOWER;' /etc/nginx/sites-available/reverse_proxy.conf 2>/dev/null && grep -q 'server_name docker.$DOMAIN_LOWER;' /etc/nginx/sites-available/reverse_proxy.conf 2>/dev/null" setup_isp_proxy
     ;;
   HQ-RTR)
     run_if_needed "HQ-RTR chrony client" "systemctl is-active --quiet chrony" setup_chrony_client
-    run_if_needed "HQ-RTR DNAT" "iptables -t nat -S 2>/dev/null | grep -q -- '--to-destination $HQ_SRV_IP:8080'" "setup_router_dnat '$HQ_SRV_IP' '$HQ_RTR_WAN_IP'"
+    run_if_needed "HQ-RTR DNAT" "iptables -t nat -S 2>/dev/null | grep -q -- '--to-destination $HQ_SRV_IP:80' && iptables -t nat -S 2>/dev/null | grep -q -- '--to-destination $HQ_SRV_IP:8080'" "setup_router_dnat '$HQ_SRV_IP' '$HQ_RTR_WAN_IP'"
     ;;
   BR-RTR)
     run_if_needed "BR-RTR chrony client" "systemctl is-active --quiet chrony" setup_chrony_client
-    run_if_needed "BR-RTR DNAT" "iptables -t nat -S 2>/dev/null | grep -q -- '--to-destination $BR_SRV_IP:8080'" "setup_router_dnat '$BR_SRV_IP' '$BR_RTR_WAN_IP'"
+    run_if_needed "BR-RTR DNAT" "iptables -t nat -S 2>/dev/null | grep -q -- '--to-destination $BR_SRV_IP:80' && iptables -t nat -S 2>/dev/null | grep -q -- '--to-destination $BR_SRV_IP:8080'" "setup_router_dnat '$BR_SRV_IP' '$BR_RTR_WAN_IP'"
     ;;
   HQ-SRV)
     run_if_needed "HQ-SRV chrony client" "systemctl is-active --quiet chrony" setup_chrony_client
-    run_if_needed "HQ-SRV DNS AD records" "grep -q '_kerberos IN TXT' /etc/bind/zones/db.$DOMAIN_LOWER 2>/dev/null" setup_bind_ad_records
+    run_if_needed "HQ-SRV DNS AD records" "grep -q '_kerberos IN TXT' /etc/bind/zones/db.$DOMAIN_LOWER 2>/dev/null && grep -q '_ldap._tcp.dc._msdcs' /etc/bind/zones/db.$DOMAIN_LOWER 2>/dev/null" setup_bind_ad_records
     run_if_needed "HQ-SRV NFS server" "exportfs -v 2>/dev/null | grep -q '$NFS_DIR'" setup_nfs_server
     run_if_needed "HQ-SRV web app" "systemctl is-active --quiet apache2 && [ -f /var/www/html/index.php ]" setup_hq_web
     ;;
@@ -461,7 +605,7 @@ case "$ROLE" in
     run_if_needed "BR-SRV chrony client" "systemctl is-active --quiet chrony" setup_chrony_client
     run_if_needed "BR-SRV Samba AD DC" "systemctl is-active --quiet samba-ad-dc && samba-tool domain info 127.0.0.1 2>/dev/null | grep -qi '$REALM_UPPER'" setup_samba_dc
     run_if_needed "BR-SRV Ansible config" "[ -f /etc/ansible/hosts ] && grep -q 'hq-srv' /etc/ansible/hosts" setup_ansible_br_srv
-    run_if_needed "BR-SRV Docker app" "docker ps --format '{{.Names}}' 2>/dev/null | grep -qx testapp" setup_docker_app_br_srv
+    run_if_needed "BR-SRV Docker app" "docker ps --format '{{.Names}}' 2>/dev/null | grep -qx testapp && grep -q 'DB_USER: \"$DOCKER_DB_USER\"' /opt/testapp/docker-compose.yml 2>/dev/null && grep -q 'DB_PASS: \"$DOCKER_DB_PASSWORD\"' /opt/testapp/docker-compose.yml 2>/dev/null" setup_docker_app_br_srv
     ;;
   HQ-CLI)
     run_if_needed "HQ-CLI domain and NFS client" "realm list 2>/dev/null | grep -qi '$DOMAIN_LOWER' && grep -q '$HQ_SRV_IP:/raid/nfs' /etc/fstab 2>/dev/null" setup_hq_cli_domain_nfs

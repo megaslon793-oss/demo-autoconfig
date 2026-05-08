@@ -35,6 +35,13 @@ else
   log_skip "DNS lookup tools not found"
 fi
 
+if command_exists nslookup && [ -n "${DOMAIN:-}" ]; then
+  dns_check_server="${DNS_CHECK_SERVER:-192.168.100.2}"
+  [ "${ROLE:-}" = "HQ-SRV" ] && dns_check_server="${DNS_CHECK_SERVER:-127.0.0.1}"
+  run_diag "nslookup ${DOMAIN} via ${dns_check_server}" nslookup "$DOMAIN" "$dns_check_server"
+  run_diag "nslookup hq-srv.${DOMAIN} via ${dns_check_server}" nslookup "hq-srv.$DOMAIN" "$dns_check_server"
+fi
+
 if [ "${GRE_ENABLE:-no}" = "yes" ]; then
   run_diag "GRE link ${GRE_NAME:-gre1}" ip -d link show "${GRE_NAME:-gre1}"
 else

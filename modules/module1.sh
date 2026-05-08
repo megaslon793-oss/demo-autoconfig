@@ -160,7 +160,14 @@ render_bind_forward_zone() {
   local serial="${BIND_ZONE_SERIAL:-2025101302}"
   local ns_name="${BIND_NS_NAME:-ns1}"
   local ns_ip="${BIND_NS_IP:-192.168.100.2}"
+  local apex_ip="${BIND_APEX_IP:-$ns_ip}"
   local record name ip
+
+  for record in ${BIND_FORWARD_RECORDS:-}; do
+    name="${record%%:*}"
+    ip="${record#*:}"
+    [ "$name" = "@" ] && [ -n "$ip" ] && [ "$name" != "$ip" ] && apex_ip="$ip"
+  done
 
   {
     printf '$TTL 3600\n'
@@ -171,11 +178,13 @@ render_bind_forward_zone() {
     printf '  1209600\n'
     printf '  300 )\n\n'
     printf '@ IN NS %s\n' "$(bind_abs_name "$ns_name" "$zone")"
+    [ -n "$apex_ip" ] && printf '@ IN A %s\n' "$apex_ip"
     printf '%s IN A %s\n\n' "$ns_name" "$ns_ip"
     for record in ${BIND_FORWARD_RECORDS:-}; do
       name="${record%%:*}"
       ip="${record#*:}"
       [ -z "$name" ] || [ -z "$ip" ] || [ "$name" = "$ip" ] && continue
+      [ "$name" = "@" ] && continue
       [ "$name" = "$ns_name" ] && continue
       printf '%s IN A %s\n' "$name" "$ip"
     done
@@ -219,6 +228,7 @@ configure_bind_base() {
     return 1
   fi
   BIND_FORWARD_RECORDS="${BIND_FORWARD_RECORDS:-hq-rtr:192.168.100.1 br-rtr:192.168.255.1 hq-srv:192.168.100.2 hq-cli:192.168.200.2 br-srv:192.168.255.2 docker:172.16.1.1 web:172.16.2.1}"
+  BIND_APEX_IP="${BIND_APEX_IP:-${BIND_NS_IP:-192.168.100.2}}"
   BIND_REVERSE_ZONES="${BIND_REVERSE_ZONES:-100.168.192.in-addr.arpa:db.192.168.100 200.168.192.in-addr.arpa:db.192.168.200 255.168.192.in-addr.arpa:db.192.168.255}"
   BIND_REVERSE_RECORDS="${BIND_REVERSE_RECORDS:-100.168.192.in-addr.arpa:1:hq-rtr 100.168.192.in-addr.arpa:2:hq-srv 200.168.192.in-addr.arpa:2:hq-cli 255.168.192.in-addr.arpa:1:br-rtr 255.168.192.in-addr.arpa:2:br-srv}"
 
@@ -393,13 +403,11 @@ configure_role_users() {
     HQ-SRV|BR-SRV)
       [ "${SSH_REMOTE_USER:-}" = "remote_user" ] && SSH_REMOTE_USER="user"
       SSH_REMOTE_USER="${SSH_REMOTE_USER:-user}"
-      SSH_REMOTE_PASSWORD="${SSH_REMOTE_PASSWORD:-P@ssw0rd}"
       SSH_USER="${SSH_USER:-sshuser}"
       SSH_PASSWORD="${SSH_PASSWORD:-P@ssw0rd}"
       ;;
     HQ-RTR|BR-RTR)
       SSH_ROUTER_EXTRA_USER="${SSH_ROUTER_EXTRA_USER:-user}"
-      SSH_ROUTER_EXTRA_PASSWORD="${SSH_ROUTER_EXTRA_PASSWORD:-P@ssw0rd}"
       SSH_ROUTER_USER="${SSH_ROUTER_USER:-net_admin}"
       SSH_ROUTER_PASSWORD="${SSH_ROUTER_PASSWORD:-P@ssw0rd}"
       ;;
@@ -407,11 +415,11 @@ configure_role_users() {
 
   case "${ROLE:-}" in
     HQ-SRV|BR-SRV)
-      ensure_local_user "${SSH_REMOTE_USER:-user}" "${SSH_REMOTE_PASSWORD:-P@ssw0rd}" "" "no"
+      ensure_local_user "${SSH_REMOTE_USER:-user}" "" "" "no"
       ensure_local_user "${SSH_USER:-sshuser}" "${SSH_PASSWORD:-P@ssw0rd}" "${SSH_USER_UID:-2026}" "yes"
       ;;
     HQ-RTR|BR-RTR)
-      ensure_local_user "${SSH_ROUTER_EXTRA_USER:-user}" "${SSH_ROUTER_EXTRA_PASSWORD:-P@ssw0rd}" "" "no"
+      ensure_local_user "${SSH_ROUTER_EXTRA_USER:-user}" "" "" "no"
       ensure_local_user "${SSH_ROUTER_USER:-net_admin}" "${SSH_ROUTER_PASSWORD:-${SSH_PASSWORD:-P@ssw0rd}}" "" "yes"
       ;;
     *)
@@ -586,7 +594,8 @@ post_checks() {
   if [ "${ROLE:-}" != "ISP" ] && [ -n "${DOMAIN:-}" ] && command_exists nslookup; then
     local dns_check_server="${DNS_CHECK_SERVER:-192.168.100.2}"
     [ "${ROLE:-}" = "HQ-SRV" ] && dns_check_server="${DNS_CHECK_SERVER:-127.0.0.1}"
-    nslookup "hq-srv.$DOMAIN" "$dns_check_server" >/dev/null 2>&1 && log_ok "DNS lookup OK via $dns_check_server" || log_warn "DNS lookup failed via $dns_check_server"
+    nslookup "$DOMAIN" "$dns_check_server" >/dev/null 2>&1 && log_ok "DNS apex lookup OK: $DOMAIN via $dns_check_server" || log_warn "DNS apex lookup failed: $DOMAIN via $dns_check_server"
+    nslookup "hq-srv.$DOMAIN" "$dns_check_server" >/dev/null 2>&1 && log_ok "DNS lookup OK: hq-srv.$DOMAIN via $dns_check_server" || log_warn "DNS lookup failed: hq-srv.$DOMAIN via $dns_check_server"
   fi
   case "${ROLE:-}" in
     HQ-SRV|BR-SRV)
