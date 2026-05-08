@@ -26,6 +26,7 @@ configure_dhcp() {
 default-lease-time 600;
 max-lease-time 7200;
 authoritative;
+ddns-update-style none;
 option domain-name "${DHCP_DOMAIN:-$DOMAIN}";
 option domain-name-servers ${DHCP_OPTION_DNS:-$DNS_SERVERS};
 
@@ -34,6 +35,7 @@ option domain-name-servers ${DHCP_OPTION_DNS:-$DNS_SERVERS};
 subnet ${DHCP_SUBNET} {
   range ${DHCP_RANGE_START} ${DHCP_RANGE_END};
   option routers ${DHCP_OPTION_ROUTERS};
+$(if [ -n "${DHCP_BROADCAST_ADDRESS:-}" ]; then printf '  option broadcast-address %s;\n' "$DHCP_BROADCAST_ADDRESS"; fi)
 }
 EOF
   enable_service isc-dhcp-server
@@ -59,6 +61,12 @@ configure_ssh_hardening() {
     printf 'Port %s\n' "${SSH_PORT:-22}"
     printf 'PermitRootLogin %s\n' "${SSH_PERMIT_ROOT_LOGIN:-prohibit-password}"
     printf 'PasswordAuthentication %s\n' "${SSH_PASSWORD_AUTHENTICATION:-yes}"
+    [ -n "${SSH_MAX_AUTH_TRIES:-}" ] && printf 'MaxAuthTries %s\n' "$SSH_MAX_AUTH_TRIES"
+    [ -n "${SSH_ALLOW_USERS:-}" ] && printf 'AllowUsers %s\n' "$SSH_ALLOW_USERS"
+    if [ -n "${SSH_BANNER_TEXT:-}" ]; then
+      printf '%s\n' "$SSH_BANNER_TEXT" > /etc/issue.net
+      printf 'Banner /etc/issue.net\n'
+    fi
     printf 'X11Forwarding no\n'
     printf 'ClientAliveInterval 300\n'
     printf 'ClientAliveCountMax 2\n'

@@ -1,7 +1,25 @@
 #!/usr/bin/env bash
 
+short_hostname() {
+  local value="${1:-}"
+  printf '%s' "${value%%.*}"
+}
+
+fqdn_hostname() {
+  local name="${1:-}"
+  local domain="${2:-}"
+  if [ -z "$name" ]; then
+    return 0
+  fi
+  case "$name" in
+    *.*) printf '%s' "$name" ;;
+    *) [ -n "$domain" ] && printf '%s.%s' "$name" "$domain" || printf '%s' "$name" ;;
+  esac
+}
+
 set_hostname_idempotent() {
-  local new_hostname="$1"
+  local new_hostname
+  new_hostname="$(fqdn_hostname "${1:-}" "${DOMAIN:-}")"
   if [ -z "$new_hostname" ]; then
     log_skip "Hostname is empty"
     return 0
@@ -16,10 +34,14 @@ set_hostname_idempotent() {
 
 configure_hosts() {
   backup_file /etc/hosts
-  local fqdn="${HOSTNAME}.${DOMAIN}"
-  grep -qE "^[[:space:]]*127\.0\.1\.1[[:space:]]+$fqdn[[:space:]]+$HOSTNAME" /etc/hosts 2>/dev/null || {
+  local fqdn short
+  fqdn="$(fqdn_hostname "${HOSTNAME:-}" "${DOMAIN:-}")"
+  short="$(short_hostname "${HOSTNAME:-}")"
+  awk -v fqdn="$fqdn" -v short="$short" \
+    '$1 == "127.0.1.1" && $2 == fqdn && $3 == short { found = 1 } END { exit found ? 0 : 1 }' \
+    /etc/hosts 2>/dev/null || {
     sed -i '/^[[:space:]]*127\.0\.1\.1[[:space:]]/d' /etc/hosts
-    printf '127.0.1.1 %s %s\n' "$fqdn" "$HOSTNAME" >> /etc/hosts
+    printf '127.0.1.1 %s %s\n' "$fqdn" "$short" >> /etc/hosts
   }
   if [ -n "${HOSTS_ENTRIES:-}" ]; then
     local old_ifs="$IFS"
@@ -63,6 +85,7 @@ configure_resolv_conf() {
 render_interfaces_file() {
   local tmp="$1"
   {
+    printf 'source /etc/network/interfaces.d/*\n\n'
     printf 'auto lo\niface lo inet loopback\n\n'
     local item iface cfg
     for item in ${IPV4_CONFIGS:-}; do
@@ -71,19 +94,112 @@ render_interfaces_file() {
       [ -z "$iface" ] && continue
       printf 'auto %s\n' "$iface"
       if [ "$cfg" = "dhcp" ]; then
-        printf 'iface %s inet dhcp\n\n' "$iface"
+        printf 'iface %s inet dhcp\n' "$iface"
+        render_interface_route_hooks "$iface"
+        printf '\n'
       elif [ "$cfg" = "manual" ]; then
-        printf 'iface %s inet manual\n\n' "$iface"
+        printf 'iface %s inet manual\n' "$iface"
+        render_interface_route_hooks "$iface"
+        printf '\n'
       elif [ -n "$cfg" ]; then
         printf 'iface %s inet static\n' "$iface"
         printf '    address %s\n' "$cfg"
         if [ "$iface" = "${WAN_IFACE:-}" ] || [ "$iface" = "${LAN_IFACE:-}" ]; then
           [ -n "${DEFAULT_GW:-}" ] && [ "$iface" = "${WAN_IFACE:-}" ] && printf '    gateway %s\n' "$DEFAULT_GW"
         fi
+        render_interface_route_hooks "$iface"
         printf '\n'
       fi
     done
+    render_gre_interfaces_stanza
   } > "$tmp"
+}
+
+route_parts() {
+  local route="$1"
+  ROUTE_DEST="${route%%:*}"
+  local rest="${route#*:}"
+  ROUTE_VIA="${rest%%:*}"
+  ROUTE_DEV=""
+  if [ "$rest" != "$ROUTE_VIA" ]; then
+    ROUTE_DEV="${rest#*:}"
+  fi
+}
+
+render_interface_route_hooks() {
+  local iface="$1"
+  [ -n "${STATIC_ROUTES_IFACE:-}" ] || return 0
+  [ "$iface" = "$STATIC_ROUTES_IFACE" ] || return 0
+  local route
+  for route in ${STATIC_ROUTES:-}; do
+    route_parts "$route"
+    [ -z "$ROUTE_DEST" ] || [ -z "$ROUTE_VIA" ] || [ "$ROUTE_DEST" = "$ROUTE_VIA" ] && continue
+    printf '    up ip route add %s via %s' "$ROUTE_DEST" "$ROUTE_VIA"
+    [ -n "$ROUTE_DEV" ] && printf ' dev %s' "$ROUTE_DEV"
+    printf '\n'
+  done
+}
+
+prefix_to_netmask() {
+  case "$1" in
+    0) printf '0.0.0.0' ;;
+    1) printf '128.0.0.0' ;;
+    2) printf '192.0.0.0' ;;
+    3) printf '224.0.0.0' ;;
+    4) printf '240.0.0.0' ;;
+    5) printf '248.0.0.0' ;;
+    6) printf '252.0.0.0' ;;
+    7) printf '254.0.0.0' ;;
+    8) printf '255.0.0.0' ;;
+    9) printf '255.128.0.0' ;;
+    10) printf '255.192.0.0' ;;
+    11) printf '255.224.0.0' ;;
+    12) printf '255.240.0.0' ;;
+    13) printf '255.248.0.0' ;;
+    14) printf '255.252.0.0' ;;
+    15) printf '255.254.0.0' ;;
+    16) printf '255.255.0.0' ;;
+    17) printf '255.255.128.0' ;;
+    18) printf '255.255.192.0' ;;
+    19) printf '255.255.224.0' ;;
+    20) printf '255.255.240.0' ;;
+    21) printf '255.255.248.0' ;;
+    22) printf '255.255.252.0' ;;
+    23) printf '255.255.254.0' ;;
+    24) printf '255.255.255.0' ;;
+    25) printf '255.255.255.128' ;;
+    26) printf '255.255.255.192' ;;
+    27) printf '255.255.255.224' ;;
+    28) printf '255.255.255.240' ;;
+    29) printf '255.255.255.248' ;;
+    30) printf '255.255.255.252' ;;
+    31) printf '255.255.255.254' ;;
+    32) printf '255.255.255.255' ;;
+    *) printf '' ;;
+  esac
+}
+
+render_gre_interfaces_stanza() {
+  [ "${GRE_ENABLE:-no}" = "yes" ] || return 0
+  [ -n "${GRE_LOCAL_IP:-}" ] && [ -n "${GRE_REMOTE_IP:-}" ] && [ -n "${GRE_TUNNEL_LOCAL_CIDR:-}" ] || return 0
+  local tunnel_ip prefix netmask route
+  tunnel_ip="${GRE_TUNNEL_LOCAL_CIDR%%/*}"
+  prefix="${GRE_TUNNEL_LOCAL_CIDR#*/}"
+  netmask="$(prefix_to_netmask "$prefix")"
+  printf 'auto %s\n' "${GRE_NAME:-gre30}"
+  printf 'iface %s inet tunnel\n' "${GRE_NAME:-gre30}"
+  printf '    address %s\n' "$tunnel_ip"
+  [ -n "$netmask" ] && printf '    netmask %s\n' "$netmask"
+  printf '    mode gre\n'
+  printf '    local %s\n' "$GRE_LOCAL_IP"
+  printf '    endpoint %s\n' "$GRE_REMOTE_IP"
+  printf '    ttl %s\n' "${GRE_TTL:-225}"
+  for route in ${GRE_ROUTES:-}; do
+    route_parts "$route"
+    [ -z "$ROUTE_DEST" ] || [ -z "$ROUTE_VIA" ] || [ "$ROUTE_DEST" = "$ROUTE_VIA" ] && continue
+    printf '    post-up ip route add %s via %s\n' "$ROUTE_DEST" "$ROUTE_VIA"
+  done
+  printf '\n'
 }
 
 configure_vlan_support() {
@@ -181,16 +297,18 @@ configure_nat() {
 }
 
 configure_static_routes() {
-  local route dest via
+  local route
   for route in ${STATIC_ROUTES:-}; do
-    dest="${route%%:*}"
-    via="${route#*:}"
-    [ -z "$dest" ] || [ -z "$via" ] || [ "$dest" = "$via" ] && continue
-    if ip route show "$dest" | grep -q "via $via"; then
-      log_skip "Route exists: $dest via $via"
+    route_parts "$route"
+    [ -z "$ROUTE_DEST" ] || [ -z "$ROUTE_VIA" ] || [ "$ROUTE_DEST" = "$ROUTE_VIA" ] && continue
+    local args
+    args=("$ROUTE_DEST" via "$ROUTE_VIA")
+    [ -n "$ROUTE_DEV" ] && args+=(dev "$ROUTE_DEV")
+    if ip route show "$ROUTE_DEST" | grep -q "via $ROUTE_VIA"; then
+      log_skip "Route exists: $ROUTE_DEST via $ROUTE_VIA"
     else
-      ip route replace "$dest" via "$via"
-      log_ok "Route configured: $dest via $via"
+      ip route replace "${args[@]}"
+      log_ok "Route configured: $ROUTE_DEST via $ROUTE_VIA"
     fi
   done
 }
@@ -209,6 +327,13 @@ configure_gre() {
   fi
   ip addr show "$GRE_NAME" | grep -q "$GRE_TUNNEL_LOCAL_CIDR" || ip addr add "$GRE_TUNNEL_LOCAL_CIDR" dev "$GRE_NAME"
   ip link set "$GRE_NAME" up
+  local route
+  for route in ${GRE_ROUTES:-}; do
+    route_parts "$route"
+    [ -z "$ROUTE_DEST" ] || [ -z "$ROUTE_VIA" ] || [ "$ROUTE_DEST" = "$ROUTE_VIA" ] && continue
+    ip route replace "$ROUTE_DEST" via "$ROUTE_VIA"
+    log_ok "GRE route configured: $ROUTE_DEST via $ROUTE_VIA"
+  done
   log_ok "GRE tunnel is up: $GRE_NAME"
 }
 
@@ -221,13 +346,31 @@ configure_frr_ospf() {
   backup_file "$conf"
   {
     printf 'frr version 8\nfrr defaults traditional\nhostname %s\nservice integrated-vtysh-config\n!\n' "${HOSTNAME:-router}"
+    printf 'ip forwarding\n!\n'
     printf 'router ospf\n'
     [ -n "${OSPF_ROUTER_ID:-}" ] && printf ' ospf router-id %s\n' "$OSPF_ROUTER_ID"
+    if [ -n "${OSPF_ACTIVE_IFACES:-}" ]; then
+      printf ' passive-interface default\n'
+      local active_iface
+      for active_iface in ${OSPF_ACTIVE_IFACES:-}; do
+        printf ' no passive-interface %s\n' "$active_iface"
+      done
+    fi
     local net
     for net in ${OSPF_NETWORKS:-}; do
       printf ' network %s area 0\n' "$net"
     done
     printf '!\n'
+    if [ -n "${OSPF_AUTH_KEY:-}" ]; then
+      local auth_iface
+      for auth_iface in ${OSPF_ACTIVE_IFACES:-${GRE_NAME:-}}; do
+        [ -z "$auth_iface" ] && continue
+        printf 'interface %s\n' "$auth_iface"
+        printf ' ip ospf authentication message-digest\n'
+        printf ' ip ospf message-digest-key 1 md5 %s\n' "$OSPF_AUTH_KEY"
+        printf '!\n'
+      done
+    fi
   } > "$conf"
   enable_service frr
   restart_service frr

@@ -83,6 +83,7 @@ create_config() {
   prompt_default NAT_OUT_IFACE "NAT outside interface" "$WAN_IFACE"
   prompt_default NAT_LAN_CIDRS "NAT source CIDRs separated by spaces" ""
   prompt_default STATIC_ROUTES "Static routes, format destination_cidr:gateway, separated by spaces" ""
+  prompt_default STATIC_ROUTES_IFACE "Interface where static route hooks are rendered in /etc/network/interfaces" "$WAN_IFACE"
 
   prompt_default GRE_ENABLE "Enable GRE: yes/no" "no"
   prompt_default GRE_NAME "GRE interface name" "gre1"
@@ -90,11 +91,14 @@ create_config() {
   prompt_default GRE_REMOTE_IP "GRE remote public/source IP" ""
   prompt_default GRE_TUNNEL_LOCAL_CIDR "GRE local tunnel address CIDR" ""
   prompt_default GRE_TUNNEL_REMOTE_CIDR "GRE remote tunnel address CIDR" ""
+  prompt_default GRE_ROUTES "Routes through GRE, format destination_cidr:gateway, separated by spaces" ""
   prompt_default GRE_TTL "GRE TTL" "255"
 
   prompt_default OSPF_ENABLE "Enable FRR/OSPF: yes/no" "no"
   prompt_default OSPF_ROUTER_ID "OSPF router-id" ""
   prompt_default OSPF_NETWORKS "OSPF networks separated by spaces" ""
+  prompt_default OSPF_ACTIVE_IFACES "OSPF non-passive interfaces separated by spaces" "$GRE_NAME"
+  prompt_default OSPF_AUTH_KEY "OSPF MD5 key for active interfaces" ""
 
   prompt_default DHCP_ENABLE "Enable DHCP server: yes/no" "no"
   prompt_default DHCP_IFACE "DHCP listen interface" "$LAN_IFACE"
@@ -103,6 +107,7 @@ create_config() {
   prompt_default DHCP_RANGE_END "DHCP range end" ""
   prompt_default DHCP_OPTION_ROUTERS "DHCP router option" ""
   prompt_default DHCP_OPTION_DNS "DHCP DNS option in dhcpd syntax, example '192.168.10.10, 8.8.8.8'" ""
+  prompt_default DHCP_BROADCAST_ADDRESS "DHCP broadcast-address option" ""
   prompt_default DHCP_DOMAIN "DHCP domain" "$DOMAIN"
 
   prompt_default BIND_ENABLE "Enable bind9 base install on this host: yes/no" "no"
@@ -112,6 +117,9 @@ create_config() {
   prompt_default SSH_PORT "SSH port" "22"
   prompt_default SSH_PERMIT_ROOT_LOGIN "SSH PermitRootLogin value" "prohibit-password"
   prompt_default SSH_PASSWORD_AUTHENTICATION "SSH PasswordAuthentication value" "yes"
+  prompt_default SSH_MAX_AUTH_TRIES "SSH MaxAuthTries value" ""
+  prompt_default SSH_ALLOW_USERS "SSH AllowUsers value" ""
+  prompt_default SSH_BANNER_TEXT "SSH banner text" ""
 
   validate_role "$ROLE"
   local iface
@@ -125,12 +133,12 @@ create_config() {
     INTERFACES "$INTERFACES" WAN_IFACE "$WAN_IFACE" LAN_IFACE "$LAN_IFACE" MGMT_IFACE "$MGMT_IFACE" \
     IPV4_CONFIGS "$IPV4_CONFIGS" DEFAULT_GW "$DEFAULT_GW" DNS_SERVERS "$DNS_SERVERS" HOSTS_ENTRIES "$HOSTS_ENTRIES" \
     NEIGHBOR_IPS "$NEIGHBOR_IPS" INTERNET_TEST_IP "$INTERNET_TEST_IP" \
-    ROUTER_ROLES "ISP HQ-RTR BR-RTR" IP_FORWARD "$IP_FORWARD" NAT_ENABLE "$NAT_ENABLE" NAT_OUT_IFACE "$NAT_OUT_IFACE" NAT_LAN_CIDRS "$NAT_LAN_CIDRS" STATIC_ROUTES "$STATIC_ROUTES" \
-    GRE_ENABLE "$GRE_ENABLE" GRE_NAME "$GRE_NAME" GRE_LOCAL_IP "$GRE_LOCAL_IP" GRE_REMOTE_IP "$GRE_REMOTE_IP" GRE_TUNNEL_LOCAL_CIDR "$GRE_TUNNEL_LOCAL_CIDR" GRE_TUNNEL_REMOTE_CIDR "$GRE_TUNNEL_REMOTE_CIDR" GRE_TTL "$GRE_TTL" \
-    OSPF_ENABLE "$OSPF_ENABLE" OSPF_ROUTER_ID "$OSPF_ROUTER_ID" OSPF_NETWORKS "$OSPF_NETWORKS" \
-    DHCP_ENABLE "$DHCP_ENABLE" DHCP_IFACE "$DHCP_IFACE" DHCP_SUBNET "$DHCP_SUBNET" DHCP_RANGE_START "$DHCP_RANGE_START" DHCP_RANGE_END "$DHCP_RANGE_END" DHCP_OPTION_ROUTERS "$DHCP_OPTION_ROUTERS" DHCP_OPTION_DNS "$DHCP_OPTION_DNS" DHCP_DOMAIN "$DHCP_DOMAIN" \
+    ROUTER_ROLES "ISP HQ-RTR BR-RTR" IP_FORWARD "$IP_FORWARD" NAT_ENABLE "$NAT_ENABLE" NAT_OUT_IFACE "$NAT_OUT_IFACE" NAT_LAN_CIDRS "$NAT_LAN_CIDRS" STATIC_ROUTES "$STATIC_ROUTES" STATIC_ROUTES_IFACE "$STATIC_ROUTES_IFACE" \
+    GRE_ENABLE "$GRE_ENABLE" GRE_NAME "$GRE_NAME" GRE_LOCAL_IP "$GRE_LOCAL_IP" GRE_REMOTE_IP "$GRE_REMOTE_IP" GRE_TUNNEL_LOCAL_CIDR "$GRE_TUNNEL_LOCAL_CIDR" GRE_TUNNEL_REMOTE_CIDR "$GRE_TUNNEL_REMOTE_CIDR" GRE_ROUTES "$GRE_ROUTES" GRE_TTL "$GRE_TTL" \
+    OSPF_ENABLE "$OSPF_ENABLE" OSPF_ROUTER_ID "$OSPF_ROUTER_ID" OSPF_NETWORKS "$OSPF_NETWORKS" OSPF_ACTIVE_IFACES "$OSPF_ACTIVE_IFACES" OSPF_AUTH_KEY "$OSPF_AUTH_KEY" \
+    DHCP_ENABLE "$DHCP_ENABLE" DHCP_IFACE "$DHCP_IFACE" DHCP_SUBNET "$DHCP_SUBNET" DHCP_RANGE_START "$DHCP_RANGE_START" DHCP_RANGE_END "$DHCP_RANGE_END" DHCP_OPTION_ROUTERS "$DHCP_OPTION_ROUTERS" DHCP_OPTION_DNS "$DHCP_OPTION_DNS" DHCP_BROADCAST_ADDRESS "$DHCP_BROADCAST_ADDRESS" DHCP_DOMAIN "$DHCP_DOMAIN" \
     BIND_ENABLE "$BIND_ENABLE" BIND_ZONES "$BIND_ZONES" \
-    SSH_HARDENING "$SSH_HARDENING" SSH_PORT "$SSH_PORT" SSH_PERMIT_ROOT_LOGIN "$SSH_PERMIT_ROOT_LOGIN" SSH_PASSWORD_AUTHENTICATION "$SSH_PASSWORD_AUTHENTICATION"
+    SSH_HARDENING "$SSH_HARDENING" SSH_PORT "$SSH_PORT" SSH_PERMIT_ROOT_LOGIN "$SSH_PERMIT_ROOT_LOGIN" SSH_PASSWORD_AUTHENTICATION "$SSH_PASSWORD_AUTHENTICATION" SSH_MAX_AUTH_TRIES "$SSH_MAX_AUTH_TRIES" SSH_ALLOW_USERS "$SSH_ALLOW_USERS" SSH_BANNER_TEXT "$SSH_BANNER_TEXT"
 
   log_ok "Config saved: $CONFIG_FILE"
 }
