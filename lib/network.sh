@@ -72,17 +72,37 @@ render_interfaces_file() {
       printf 'auto %s\n' "$iface"
       if [ "$cfg" = "dhcp" ]; then
         printf 'iface %s inet dhcp\n\n' "$iface"
+      elif [ "$cfg" = "manual" ]; then
+        printf 'iface %s inet manual\n\n' "$iface"
       elif [ -n "$cfg" ]; then
         printf 'iface %s inet static\n' "$iface"
         printf '    address %s\n' "$cfg"
         if [ "$iface" = "${WAN_IFACE:-}" ] || [ "$iface" = "${LAN_IFACE:-}" ]; then
           [ -n "${DEFAULT_GW:-}" ] && [ "$iface" = "${WAN_IFACE:-}" ] && printf '    gateway %s\n' "$DEFAULT_GW"
         fi
-        [ -n "${DNS_SERVERS:-}" ] && printf '    dns-nameservers %s\n' "$DNS_SERVERS"
         printf '\n'
       fi
     done
   } > "$tmp"
+}
+
+configure_vlan_support() {
+  case " ${IPV4_CONFIGS:-} " in
+    *.*:*)
+      install_packages vlan || true
+      if command_exists modprobe; then
+        modprobe 8021q || log_warn "Could not load 8021q module"
+      fi
+      mkdir -p /etc/modules-load.d
+      if grep -qxF 8021q /etc/modules-load.d/8021q.conf 2>/dev/null; then
+        log_skip "8021q module autoload already configured"
+      else
+        printf '8021q\n' > /etc/modules-load.d/8021q.conf
+        log_ok "8021q module autoload configured"
+      fi
+      ;;
+    *) log_skip "No VLAN interfaces in config" ;;
+  esac
 }
 
 configure_network_interfaces() {
@@ -90,6 +110,7 @@ configure_network_interfaces() {
     log_warn "/etc/network not found. This host may use NetworkManager or systemd-networkd."
     return 0
   fi
+  configure_vlan_support
   local tmp
   tmp="$(mktemp)"
   render_interfaces_file "$tmp"
