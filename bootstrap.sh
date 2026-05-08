@@ -5,8 +5,12 @@ PROJECT_NAME="demo-autoconfig"
 TMP_ROOT="/tmp/demo-autoconfig"
 LOG_FILE="/var/log/demo-autoconfig.log"
 
-DEFAULT_ARCHIVE_URL="https://github.com/megaslon793-oss/demo-autoconfig/archive/refs/heads/main.tar.gz"
+DEFAULT_ARCHIVE_URL="https://codeload.github.com/megaslon793-oss/demo-autoconfig/tar.gz/refs/heads/main"
 ARCHIVE_URL="${DEMO_REPO_ARCHIVE_URL:-$DEFAULT_ARCHIVE_URL}"
+FALLBACK_ARCHIVE_URL="https://github.com/megaslon793-oss/demo-autoconfig/archive/refs/heads/main.tar.gz"
+DOWNLOAD_RETRIES="${DEMO_DOWNLOAD_RETRIES:-12}"
+DOWNLOAD_WAIT="${DEMO_DOWNLOAD_WAIT:-3}"
+DOWNLOAD_TIMEOUT="${DEMO_DOWNLOAD_TIMEOUT:-25}"
 
 status() {
   local level="$1"; shift
@@ -30,23 +34,19 @@ download_project() {
   rm -rf "$extract"
   mkdir -p "$extract"
 
-  status OK "Downloading project archive from $ARCHIVE_URL"
-  if command -v curl >/dev/null 2>&1; then
-    if ! curl -fsSL "$ARCHIVE_URL" -o "$archive"; then
-      status ERROR "Download failed with curl. Check internet, DNS, TLS certificates, proxy, or use offline copy."
-      exit 1
+  status OK "Downloading project archive"
+  local urls="$ARCHIVE_URL"
+  [ "$ARCHIVE_URL" = "$FALLBACK_ARCHIVE_URL" ] || urls="$urls $FALLBACK_ARCHIVE_URL"
+  local url downloaded="no"
+  for url in $urls; do
+    status OK "Trying: $url"
+    if download_url "$url" "$archive"; then
+      downloaded="yes"
+      break
     fi
-  elif command -v wget >/dev/null 2>&1; then
-    if ! wget -qO "$archive" "$ARCHIVE_URL"; then
-      status ERROR "Download failed with wget. Check internet, DNS, TLS certificates, proxy, or use offline copy."
-      exit 1
-    fi
-  else
-    status ERROR "Neither curl nor wget is installed."
-    exit 1
-  fi
-  if [ ! -s "$archive" ]; then
-    status ERROR "Downloaded archive is empty: $archive"
+  done
+  if [ "$downloaded" != "yes" ] || [ ! -s "$archive" ]; then
+    status ERROR "Download failed. Check internet, DNS, TLS certificates, proxy, or use offline copy."
     exit 1
   fi
   tar -xzf "$archive" -C "$extract"
@@ -60,6 +60,35 @@ download_project() {
 
   chmod +x "$project_dir/menu.sh" "$project_dir"/modules/*.sh 2>/dev/null || true
   echo "$project_dir"
+}
+
+download_url() {
+  local url="$1"
+  local output="$2"
+  rm -f "$output"
+  if command -v curl >/dev/null 2>&1; then
+    curl -4 -fL \
+      --connect-timeout "$DOWNLOAD_TIMEOUT" \
+      --max-time 300 \
+      --retry "$DOWNLOAD_RETRIES" \
+      --retry-delay "$DOWNLOAD_WAIT" \
+      --retry-connrefused \
+      "$url" -o "$output" && return 0
+  elif command -v wget >/dev/null 2>&1; then
+    wget -4 \
+      --tries="$DOWNLOAD_RETRIES" \
+      --waitretry="$DOWNLOAD_WAIT" \
+      --timeout="$DOWNLOAD_TIMEOUT" \
+      --dns-timeout="$DOWNLOAD_TIMEOUT" \
+      --connect-timeout="$DOWNLOAD_TIMEOUT" \
+      --read-timeout=120 \
+      -O "$output" "$url" && return 0
+  else
+    status ERROR "Neither curl nor wget is installed."
+    exit 1
+  fi
+  rm -f "$output"
+  return 1
 }
 
 main() {

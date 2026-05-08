@@ -9,7 +9,7 @@ ask_role_common() {
   prompt_default DOMAIN "Domain" "au-team.irpo"
   prompt_default HOSTNAME "Hostname (FQDN)" "$(fqdn_hostname "$default_hostname" "$DOMAIN")"
   HOSTNAME="$(fqdn_hostname "$HOSTNAME" "$DOMAIN")"
-  prompt_default DNS_SERVERS "DNS servers separated by spaces" "8.8.8.8 192.168.100.2"
+  prompt_default DNS_SERVERS "DNS servers separated by spaces" "192.168.100.2 8.8.8.8"
   prompt_default INTERNET_TEST_IP "Internet test IP" "8.8.8.8"
 }
 
@@ -18,6 +18,7 @@ set_module1_defaults() {
   ISO_MOUNTPOINT="/mnt/additional"
   LOCK_RESOLV_CONF="no"
   NETWORK_APPLY_ACTION="restart"
+  RESOLV_OPTIONS="timeout:2 attempts:3"
   INTERNET_IFACE=""
   INTERNET_IFACE_METRIC=""
   DEFAULT_GW_METRIC=""
@@ -68,7 +69,7 @@ save_scenario_config() {
   backup_file "$CONFIG_FILE"
   write_kv_config "$CONFIG_FILE" \
     ROLE "$ROLE" HOSTNAME "$HOSTNAME" DOMAIN "$DOMAIN" \
-    ISO_PATH "" ISO_MOUNTPOINT "/mnt/additional" LOCK_RESOLV_CONF "no" NETWORK_APPLY_ACTION "$NETWORK_APPLY_ACTION" \
+    ISO_PATH "" ISO_MOUNTPOINT "/mnt/additional" LOCK_RESOLV_CONF "no" NETWORK_APPLY_ACTION "$NETWORK_APPLY_ACTION" RESOLV_OPTIONS "$RESOLV_OPTIONS" \
     INTERFACES "$INTERFACES" WAN_IFACE "$WAN_IFACE" LAN_IFACE "$LAN_IFACE" MGMT_IFACE "${MGMT_IFACE:-}" INTERNET_IFACE "${INTERNET_IFACE:-}" INTERNET_IFACE_METRIC "${INTERNET_IFACE_METRIC:-}" DEFAULT_GW_METRIC "${DEFAULT_GW_METRIC:-}" \
     IPV4_CONFIGS "$IPV4_CONFIGS" DEFAULT_GW "$DEFAULT_GW" DNS_SERVERS "$DNS_SERVERS" HOSTS_ENTRIES "$HOSTS_ENTRIES" \
     NEIGHBOR_IPS "$NEIGHBOR_IPS" INTERNET_TEST_IP "$INTERNET_TEST_IP" \
@@ -266,11 +267,7 @@ scenario_hq_cli() {
   set_module1_defaults
   prompt_default HQ_CLI_PARENT_IFACE "Physical trunk interface" "ens33"
   prompt_default HQ_CLI_VLAN_ID "HQ-CLI VLAN ID" "200"
-  prompt_default INTERNET_IFACE "Extra DHCP Internet interface" "ens36"
-  prompt_default HQ_CLI_GATEWAY "HQ-CLI lab gateway" "192.168.200.1"
   prompt_default IPV4_MODE "IPv4 mode: dhcp or static" "dhcp"
-  INTERNET_IFACE_METRIC="50"
-  DEFAULT_GW_METRIC="200"
   LAN_IFACE="$HQ_CLI_PARENT_IFACE.$HQ_CLI_VLAN_ID"
   if [ "$IPV4_MODE" = "static" ]; then
     prompt_default HQ_CLI_IP_CIDR "HQ-CLI IP" "192.168.200.2/27"
@@ -282,12 +279,9 @@ scenario_hq_cli() {
   fi
 
   WAN_IFACE="$LAN_IFACE"
-  INTERFACES="$LAN_IFACE $INTERNET_IFACE"
-  IPV4_CONFIGS="$IPV4_CONFIGS $INTERNET_IFACE:dhcp"
+  INTERFACES="$LAN_IFACE"
   HOSTS_ENTRIES="192.168.200.1 hq-rtr.$DOMAIN hq-rtr;192.168.100.2 hq-srv.$DOMAIN hq-srv"
   NEIGHBOR_IPS="${DEFAULT_GW:-192.168.200.1}"
-  STATIC_ROUTES="192.168.100.0/28:$HQ_CLI_GATEWAY:$LAN_IFACE 192.168.255.0/28:$HQ_CLI_GATEWAY:$LAN_IFACE 192.168.250.0/29:$HQ_CLI_GATEWAY:$LAN_IFACE 172.16.0.0/16:$HQ_CLI_GATEWAY:$LAN_IFACE"
-  STATIC_ROUTES_IFACE="$LAN_IFACE"
   NAT_OUT_IFACE=""
   SSH_HARDENING="no"
   save_scenario_config

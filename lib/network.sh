@@ -17,13 +17,6 @@ fqdn_hostname() {
   esac
 }
 
-vlan_parent_iface() {
-  local iface="${1:-}"
-  case "$iface" in
-    *.*) printf '%s' "${iface%.*}" ;;
-  esac
-}
-
 set_hostname_idempotent() {
   local new_hostname
   new_hostname="$(fqdn_hostname "${1:-}" "${DOMAIN:-}")"
@@ -78,9 +71,14 @@ configure_resolv_conf() {
   backup_file /etc/resolv.conf
   {
     [ -n "${DOMAIN:-}" ] && printf 'search %s\n' "$DOMAIN"
-    local dns
+    [ -n "${RESOLV_OPTIONS:-timeout:2 attempts:3}" ] && printf 'options %s\n' "${RESOLV_OPTIONS:-timeout:2 attempts:3}"
+    local dns seen_dns=" "
     for dns in ${DNS_SERVERS:-}; do
+      case "$seen_dns" in
+        *" $dns "*) continue ;;
+      esac
       printf 'nameserver %s\n' "$dns"
+      seen_dns="$seen_dns$dns "
     done
   } > /etc/resolv.conf
   if [ "${LOCK_RESOLV_CONF:-no}" = "yes" ] && command_exists chattr; then
@@ -100,11 +98,8 @@ render_interfaces_file() {
       cfg="${item#*:}"
       [ -z "$iface" ] && continue
       printf 'auto %s\n' "$iface"
-      local parent
-      parent="$(vlan_parent_iface "$iface")"
       if [ "$cfg" = "dhcp" ]; then
         printf 'iface %s inet dhcp\n' "$iface"
-        [ -n "$parent" ] && printf '    pre-up ip link set %s up || true\n' "$parent"
         local metric
         metric="$(interface_metric "$iface")"
         [ -n "$metric" ] && printf '    metric %s\n' "$metric"
@@ -112,12 +107,10 @@ render_interfaces_file() {
         printf '\n'
       elif [ "$cfg" = "manual" ]; then
         printf 'iface %s inet manual\n' "$iface"
-        printf '    up ip link set %s up || true\n' "$iface"
         render_interface_route_hooks "$iface"
         printf '\n'
       elif [ -n "$cfg" ]; then
         printf 'iface %s inet static\n' "$iface"
-        [ -n "$parent" ] && printf '    pre-up ip link set %s up || true\n' "$parent"
         printf '    address %s\n' "$cfg"
         if [ "$iface" = "${WAN_IFACE:-}" ] || [ "$iface" = "${LAN_IFACE:-}" ]; then
           [ -n "${DEFAULT_GW:-}" ] && [ "$iface" = "${WAN_IFACE:-}" ] && printf '    gateway %s\n' "$DEFAULT_GW"
