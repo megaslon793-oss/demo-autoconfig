@@ -95,6 +95,9 @@ render_interfaces_file() {
       printf 'auto %s\n' "$iface"
       if [ "$cfg" = "dhcp" ]; then
         printf 'iface %s inet dhcp\n' "$iface"
+        local metric
+        metric="$(interface_metric "$iface")"
+        [ -n "$metric" ] && printf '    metric %s\n' "$metric"
         render_interface_route_hooks "$iface"
         printf '\n'
       elif [ "$cfg" = "manual" ]; then
@@ -106,6 +109,7 @@ render_interfaces_file() {
         printf '    address %s\n' "$cfg"
         if [ "$iface" = "${WAN_IFACE:-}" ] || [ "$iface" = "${LAN_IFACE:-}" ]; then
           [ -n "${DEFAULT_GW:-}" ] && [ "$iface" = "${WAN_IFACE:-}" ] && printf '    gateway %s\n' "$DEFAULT_GW"
+          [ -n "${DEFAULT_GW:-}" ] && [ "$iface" = "${WAN_IFACE:-}" ] && [ -n "${DEFAULT_GW_METRIC:-}" ] && printf '    metric %s\n' "$DEFAULT_GW_METRIC"
         fi
         render_interface_route_hooks "$iface"
         printf '\n'
@@ -113,6 +117,17 @@ render_interfaces_file() {
     done
     render_gre_interfaces_stanza
   } > "$tmp"
+}
+
+interface_metric() {
+  local iface="$1"
+  if [ -n "${INTERNET_IFACE:-}" ] && [ "$iface" = "$INTERNET_IFACE" ]; then
+    printf '%s' "${INTERNET_IFACE_METRIC:-50}"
+    return 0
+  fi
+  if [ -n "${DEFAULT_GW_METRIC:-}" ] && { [ "$iface" = "${WAN_IFACE:-}" ] || [ "$iface" = "${LAN_IFACE:-}" ]; }; then
+    printf '%s' "$DEFAULT_GW_METRIC"
+  fi
 }
 
 route_parts() {
@@ -134,7 +149,7 @@ render_interface_route_hooks() {
   for route in ${STATIC_ROUTES:-}; do
     route_parts "$route"
     [ -z "$ROUTE_DEST" ] || [ -z "$ROUTE_VIA" ] || [ "$ROUTE_DEST" = "$ROUTE_VIA" ] && continue
-    printf '    up ip route add %s via %s' "$ROUTE_DEST" "$ROUTE_VIA"
+    printf '    up ip route replace %s via %s' "$ROUTE_DEST" "$ROUTE_VIA"
     [ -n "$ROUTE_DEV" ] && printf ' dev %s' "$ROUTE_DEV"
     printf '\n'
   done

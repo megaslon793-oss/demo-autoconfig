@@ -83,6 +83,9 @@ create_config() {
   prompt_default WAN_IFACE "WAN/upstream interface" ""
   prompt_default LAN_IFACE "LAN/downstream interface" ""
   prompt_default MGMT_IFACE "Management interface" ""
+  prompt_default INTERNET_IFACE "Extra DHCP Internet interface" ""
+  prompt_default INTERNET_IFACE_METRIC "Metric for extra DHCP Internet interface" ""
+  prompt_default DEFAULT_GW_METRIC "Metric for lab/default gateway interface" ""
   prompt_default IPV4_CONFIGS "IPv4 configs, format iface:cidr or iface:dhcp, separated by spaces" ""
   prompt_default DEFAULT_GW "Default gateway IP" ""
   prompt_default DNS_SERVERS "DNS servers separated by spaces" ""
@@ -144,7 +147,7 @@ create_config() {
   write_kv_config "$CONFIG_FILE" \
     ROLE "$ROLE" HOSTNAME "$HOSTNAME" DOMAIN "$DOMAIN" \
     ISO_PATH "$ISO_PATH" ISO_MOUNTPOINT "$ISO_MOUNTPOINT" LOCK_RESOLV_CONF "$LOCK_RESOLV_CONF" NETWORK_APPLY_ACTION "$NETWORK_APPLY_ACTION" \
-    INTERFACES "$INTERFACES" WAN_IFACE "$WAN_IFACE" LAN_IFACE "$LAN_IFACE" MGMT_IFACE "$MGMT_IFACE" \
+    INTERFACES "$INTERFACES" WAN_IFACE "$WAN_IFACE" LAN_IFACE "$LAN_IFACE" MGMT_IFACE "$MGMT_IFACE" INTERNET_IFACE "$INTERNET_IFACE" INTERNET_IFACE_METRIC "$INTERNET_IFACE_METRIC" DEFAULT_GW_METRIC "$DEFAULT_GW_METRIC" \
     IPV4_CONFIGS "$IPV4_CONFIGS" DEFAULT_GW "$DEFAULT_GW" DNS_SERVERS "$DNS_SERVERS" HOSTS_ENTRIES "$HOSTS_ENTRIES" \
     NEIGHBOR_IPS "$NEIGHBOR_IPS" INTERNET_TEST_IP "$INTERNET_TEST_IP" \
     ROUTER_ROLES "ISP HQ-RTR BR-RTR" IP_FORWARD "$IP_FORWARD" NAT_ENABLE "$NAT_ENABLE" NAT_OUT_IFACE "$NAT_OUT_IFACE" NAT_LAN_CIDRS "$NAT_LAN_CIDRS" STATIC_ROUTES "$STATIC_ROUTES" STATIC_ROUTES_IFACE "$STATIC_ROUTES_IFACE" \
