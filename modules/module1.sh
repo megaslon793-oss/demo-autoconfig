@@ -271,32 +271,67 @@ configure_bind_base() {
   restart_service bind9
 }
 
-configure_ssh_hardening() {
-  [ "${SSH_HARDENING:-yes}" = "yes" ] || { log_skip "SSH hardening disabled by config"; return 0; }
-  install_packages openssh-server
+remove_old_ssh_dropin() {
   local dropin_dir="/etc/ssh/sshd_config.d"
   local dropin="$dropin_dir/99-demo-autoconfig.conf"
-  mkdir -p "$dropin_dir"
-  backup_file "$dropin"
-  {
-    printf 'Port %s\n' "${SSH_PORT:-22}"
-    printf 'PermitRootLogin %s\n' "${SSH_PERMIT_ROOT_LOGIN:-prohibit-password}"
-    printf 'PasswordAuthentication %s\n' "${SSH_PASSWORD_AUTHENTICATION:-yes}"
-    [ -n "${SSH_MAX_AUTH_TRIES:-}" ] && printf 'MaxAuthTries %s\n' "$SSH_MAX_AUTH_TRIES"
-    [ -n "${SSH_ALLOW_USERS:-}" ] && printf 'AllowUsers %s\n' "$SSH_ALLOW_USERS"
+  if [ -f "$dropin" ]; then
+    backup_file "$dropin"
+    rm -f "$dropin"
+    log_ok "Old managed SSH drop-in removed: $dropin"
+  fi
+}
+
+set_sshd_directive() {
+  local file="$1"
+  local key="$2"
+  local value="$3"
+  local tmp
+  tmp="$(mktemp)"
+  awk -v key="$key" -v value="$value" '
+    BEGIN { done = 0 }
+    $0 ~ "^[#[:space:]]*" key "([[:space:]]+|$)" {
+      if (!done) {
+        print key " " value
+        done = 1
+      }
+      next
+    }
+    { print }
+    END {
+      if (!done) {
+        print key " " value
+      }
+    }
+  ' "$file" > "$tmp"
+  cp "$tmp" "$file"
+  rm -f "$tmp"
+}
+
+configure_ssh_service() {
+  install_packages openssh-server
+  remove_old_ssh_dropin
+
+  if [ "${SSH_HARDENING:-no}" = "yes" ]; then
+    local conf="/etc/ssh/sshd_config"
+    [ -f "$conf" ] || touch "$conf"
+    backup_file "$conf"
+    set_sshd_directive "$conf" Port "${SSH_PORT:-2026}"
+    set_sshd_directive "$conf" PermitRootLogin "${SSH_PERMIT_ROOT_LOGIN:-no}"
+    set_sshd_directive "$conf" MaxAuthTries "${SSH_MAX_AUTH_TRIES:-2}"
+    [ -n "${SSH_ALLOW_USERS:-}" ] && set_sshd_directive "$conf" AllowUsers "$SSH_ALLOW_USERS"
     if [ -n "${SSH_BANNER_TEXT:-}" ]; then
       printf '%s\n' "$SSH_BANNER_TEXT" > /etc/issue.net
-      printf 'Banner /etc/issue.net\n'
+      set_sshd_directive "$conf" Banner /etc/issue.net
     fi
-    printf 'X11Forwarding no\n'
-    printf 'ClientAliveInterval 300\n'
-    printf 'ClientAliveCountMax 2\n'
-  } > "$dropin"
+  else
+    log_skip "SSH hardening disabled by config; installing and starting ssh only"
+  fi
+
   if sshd -t; then
     enable_service ssh
     restart_service ssh
   else
-    log_error "sshd config validation failed. See $dropin"
+    log_error "sshd config validation failed. See /etc/ssh/sshd_config"
     return 1
   fi
 }
@@ -383,7 +418,7 @@ main() {
   configure_frr_ospf
   configure_dhcp
   configure_bind_base
-  configure_ssh_hardening
+  configure_ssh_service
   apply_networking_changes
   reconcile_routing_after_network_restart
   post_checks
