@@ -222,6 +222,7 @@ configure_bind_base() {
   BIND_REVERSE_ZONES="${BIND_REVERSE_ZONES:-100.168.192.in-addr.arpa:db.192.168.100 200.168.192.in-addr.arpa:db.192.168.200 255.168.192.in-addr.arpa:db.192.168.255}"
   BIND_REVERSE_RECORDS="${BIND_REVERSE_RECORDS:-100.168.192.in-addr.arpa:1:hq-rtr 100.168.192.in-addr.arpa:2:hq-srv 200.168.192.in-addr.arpa:2:hq-cli 255.168.192.in-addr.arpa:1:br-rtr 255.168.192.in-addr.arpa:2:br-srv}"
 
+  local bind_clients="${BIND_ALLOW_QUERY:-127.0.0.1 192.168.100.0/28 192.168.200.0/27 192.168.250.0/29 192.168.255.0/28 172.16.0.0/16 10.0.0.0/30}"
   local zones_dir="/etc/bind/zones"
   local forward_file="$zones_dir/db.$zone"
   mkdir -p "$zones_dir"
@@ -234,7 +235,13 @@ configure_bind_base() {
     printf '    listen-on-v6 { none; };\n'
     printf '    recursion yes;\n\n'
     printf '    allow-query {\n'
-    render_bind_acl_block "${BIND_ALLOW_QUERY:-127.0.0.1 192.168.100.0/28 192.168.200.0/27 192.168.255.0/28}"
+    render_bind_acl_block "$bind_clients"
+    printf '    };\n\n'
+    printf '    allow-recursion {\n'
+    render_bind_acl_block "$bind_clients"
+    printf '    };\n\n'
+    printf '    allow-query-cache {\n'
+    render_bind_acl_block "$bind_clients"
     printf '    };\n\n'
     printf '    forwarders {\n'
     render_bind_acl_block "${BIND_FORWARDERS:-77.88.8.7 77.88.8.3}"
@@ -297,8 +304,8 @@ configure_bind_base() {
     done
   fi
 
-  enable_service bind9
-  restart_service bind9
+  enable_service_any bind9 named
+  restart_service_any bind9 named
 }
 
 remove_old_ssh_dropin() {
@@ -337,18 +344,148 @@ set_sshd_directive() {
   rm -f "$tmp"
 }
 
+sshd_binary() {
+  if command_exists sshd; then
+    command -v sshd
+  elif [ -x /usr/sbin/sshd ]; then
+    printf '/usr/sbin/sshd'
+  else
+    return 1
+  fi
+}
+
+ensure_local_user() {
+  local user="$1"
+  local password="${2:-}"
+  local uid="${3:-}"
+  local sudo_access="${4:-no}"
+  [ -n "$user" ] || return 0
+
+  if id "$user" >/dev/null 2>&1; then
+    log_skip "User already exists: $user"
+  else
+    local args=(-m -s /bin/bash)
+    if [ -n "$uid" ] && ! getent passwd "$uid" >/dev/null 2>&1; then
+      args+=(-u "$uid")
+    fi
+    useradd "${args[@]}" "$user"
+    log_ok "User created: $user"
+  fi
+
+  usermod -s /bin/bash "$user" 2>/dev/null || true
+  if [ -n "$password" ]; then
+    printf '%s:%s\n' "$user" "$password" | chpasswd
+    log_ok "Password configured for user: $user"
+  fi
+
+  if [ "$sudo_access" = "yes" ]; then
+    install_packages sudo
+    usermod -aG sudo "$user" 2>/dev/null || true
+    mkdir -p /etc/sudoers.d
+    printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$user" > "/etc/sudoers.d/$user"
+    chmod 440 "/etc/sudoers.d/$user"
+    log_ok "Passwordless sudo configured for user: $user"
+  fi
+}
+
+configure_role_users() {
+  case "${ROLE:-}" in
+    HQ-SRV|BR-SRV)
+      ensure_local_user "${SSH_REMOTE_USER:-remote_user}" "" "" "no"
+      ensure_local_user "${SSH_USER:-sshuser}" "${SSH_PASSWORD:-P@ssw0rd}" "${SSH_USER_UID:-2026}" "yes"
+      ;;
+    HQ-RTR|BR-RTR)
+      ensure_local_user "${SSH_ROUTER_USER:-net_admin}" "${SSH_ROUTER_PASSWORD:-${SSH_PASSWORD:-P@ssw0rd}}" "" "yes"
+      ensure_local_user "${SSH_USER:-sshuser}" "${SSH_PASSWORD:-P@ssw0rd}" "${SSH_USER_UID:-2026}" "yes"
+      ;;
+    *)
+      log_skip "No managed local users required for role: ${ROLE:-unknown}"
+      ;;
+  esac
+}
+
+ensure_ssh_client_include() {
+  local conf="/etc/ssh/ssh_config"
+  [ -f "$conf" ] || touch "$conf"
+  if grep -Eq '^[[:space:]]*Include[[:space:]]+/etc/ssh/ssh_config\.d/\*\.conf' "$conf"; then
+    return 0
+  fi
+  backup_file "$conf"
+  local tmp
+  tmp="$(mktemp)"
+  {
+    printf 'Include /etc/ssh/ssh_config.d/*.conf\n'
+    cat "$conf"
+  } > "$tmp"
+  cp "$tmp" "$conf"
+  rm -f "$tmp"
+}
+
+configure_ssh_client_aliases() {
+  [ "${SSH_CLIENT_CONFIG:-no}" = "yes" ] || [ "${ROLE:-}" = "HQ-CLI" ] || return 0
+  install_packages openssh-client
+  mkdir -p /etc/ssh/ssh_config.d
+  ensure_ssh_client_include
+
+  local conf="/etc/ssh/ssh_config.d/99-demo-autoconfig.conf"
+  local domain="${DOMAIN:-au-team.irpo}"
+  local server_user="${SSH_USER:-sshuser}"
+  local server_port="${SSH_SERVER_PORT:-${SSH_PORT:-2026}}"
+  local router_user="${SSH_ROUTER_USER:-net_admin}"
+  local router_port="${SSH_ROUTER_PORT:-2026}"
+  backup_file "$conf"
+  cat > "$conf" <<EOF
+Host hq-srv hq-srv.$domain
+    HostName hq-srv.$domain
+    User $server_user
+    Port $server_port
+    StrictHostKeyChecking accept-new
+
+Host br-srv br-srv.$domain
+    HostName br-srv.$domain
+    User $server_user
+    Port $server_port
+    StrictHostKeyChecking accept-new
+
+Host hq-rtr hq-rtr.$domain
+    HostName hq-rtr.$domain
+    User $router_user
+    Port $router_port
+    StrictHostKeyChecking accept-new
+
+Host br-rtr br-rtr.$domain
+    HostName br-rtr.$domain
+    User $router_user
+    Port $router_port
+    StrictHostKeyChecking accept-new
+EOF
+  chmod 644 "$conf"
+  log_ok "SSH client aliases configured: hq-srv, br-srv, hq-rtr, br-rtr"
+}
+
 configure_ssh_service() {
+  install_packages openssh-client
   install_packages openssh-server
   remove_old_ssh_dropin
+  configure_role_users
+  configure_ssh_client_aliases
 
   if [ "${SSH_HARDENING:-no}" = "yes" ]; then
     local conf="/etc/ssh/sshd_config"
+    local allow_users="${SSH_ALLOW_USERS:-}"
+    case "${ROLE:-}" in
+      HQ-SRV|BR-SRV) [ -n "$allow_users" ] || allow_users="${SSH_USER:-sshuser}" ;;
+      HQ-RTR|BR-RTR) [ -n "$allow_users" ] || allow_users="${SSH_ROUTER_USER:-net_admin} ${SSH_USER:-sshuser}" ;;
+    esac
     [ -f "$conf" ] || touch "$conf"
     backup_file "$conf"
     set_sshd_directive "$conf" Port "${SSH_PORT:-2026}"
     set_sshd_directive "$conf" PermitRootLogin "${SSH_PERMIT_ROOT_LOGIN:-no}"
+    set_sshd_directive "$conf" PasswordAuthentication "${SSH_PASSWORD_AUTHENTICATION:-yes}"
+    set_sshd_directive "$conf" KbdInteractiveAuthentication yes
+    set_sshd_directive "$conf" UsePAM yes
     set_sshd_directive "$conf" MaxAuthTries "${SSH_MAX_AUTH_TRIES:-2}"
-    [ -n "${SSH_ALLOW_USERS:-}" ] && set_sshd_directive "$conf" AllowUsers "$SSH_ALLOW_USERS"
+    [ -n "$allow_users" ] && set_sshd_directive "$conf" AllowUsers "$allow_users"
     if [ -n "${SSH_BANNER_TEXT:-}" ]; then
       printf '%s\n' "$SSH_BANNER_TEXT" > /etc/issue.net
       set_sshd_directive "$conf" Banner /etc/issue.net
@@ -357,9 +494,11 @@ configure_ssh_service() {
     log_skip "SSH hardening disabled by config; installing and starting ssh only"
   fi
 
-  if sshd -t; then
-    enable_service ssh
-    restart_service ssh
+  local sshd_cmd
+  mkdir -p /run/sshd
+  if sshd_cmd="$(sshd_binary)" && "$sshd_cmd" -t; then
+    enable_service_any ssh sshd
+    restart_service_any ssh sshd
   else
     log_error "sshd config validation failed. See /etc/ssh/sshd_config"
     return 1
@@ -427,6 +566,25 @@ post_checks() {
   if [ "${OSPF_ENABLE:-no}" = "yes" ] && command_exists vtysh; then
     vtysh -c 'show ip ospf neighbor' || true
   fi
+  [ -n "${INTERNET_TEST_IP:-}" ] && ping -c 1 -W 3 "$INTERNET_TEST_IP" >/dev/null 2>&1 && log_ok "Internet test ping OK: $INTERNET_TEST_IP" || log_warn "Internet test ping skipped or failed"
+  if [ "${ROLE:-}" != "ISP" ] && [ -n "${DOMAIN:-}" ] && command_exists nslookup; then
+    local dns_check_server="${DNS_CHECK_SERVER:-192.168.100.2}"
+    [ "${ROLE:-}" = "HQ-SRV" ] && dns_check_server="${DNS_CHECK_SERVER:-127.0.0.1}"
+    nslookup "hq-srv.$DOMAIN" "$dns_check_server" >/dev/null 2>&1 && log_ok "DNS lookup OK via $dns_check_server" || log_warn "DNS lookup failed via $dns_check_server"
+  fi
+  case "${ROLE:-}" in
+    HQ-SRV|BR-SRV)
+      id "${SSH_USER:-sshuser}" >/dev/null 2>&1 && log_ok "SSH server user exists: ${SSH_USER:-sshuser}" || log_warn "SSH server user missing: ${SSH_USER:-sshuser}"
+      id "${SSH_REMOTE_USER:-remote_user}" >/dev/null 2>&1 && log_ok "Additional server user exists: ${SSH_REMOTE_USER:-remote_user}" || log_warn "Additional server user missing: ${SSH_REMOTE_USER:-remote_user}"
+      ;;
+    HQ-RTR|BR-RTR)
+      id "${SSH_ROUTER_USER:-net_admin}" >/dev/null 2>&1 && log_ok "Router SSH user exists: ${SSH_ROUTER_USER:-net_admin}" || log_warn "Router SSH user missing: ${SSH_ROUTER_USER:-net_admin}"
+      id "${SSH_USER:-sshuser}" >/dev/null 2>&1 && log_ok "Router additional SSH user exists: ${SSH_USER:-sshuser}" || log_warn "Router additional SSH user missing: ${SSH_USER:-sshuser}"
+      ;;
+  esac
+  if [ "${SSH_HARDENING:-no}" = "yes" ] && command_exists ss; then
+    ss -ltn | grep -q ":${SSH_PORT:-2026} " && log_ok "SSH listens on port ${SSH_PORT:-2026}" || log_warn "SSH is not listening on port ${SSH_PORT:-2026}"
+  fi
 }
 
 main() {
@@ -444,6 +602,8 @@ main() {
 
   configure_nat
   apply_networking_changes
+  configure_resolv_conf
+  ensure_default_route
   configure_static_routes
   configure_gre
   configure_frr_ospf
@@ -451,6 +611,8 @@ main() {
   configure_bind_base
   configure_ssh_service
   reconcile_routing_after_network_restart
+  ensure_default_route
+  configure_resolv_conf
   post_checks
 }
 

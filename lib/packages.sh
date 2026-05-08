@@ -77,6 +77,17 @@ enable_service() {
   fi
 }
 
+enable_service_any() {
+  local service
+  for service in "$@"; do
+    if systemctl list-unit-files "$service.service" >/dev/null 2>&1; then
+      enable_service "$service"
+      return 0
+    fi
+  done
+  log_warn "Service unit not found, enable skipped: $*"
+}
+
 restart_service() {
   local service="$1"
   if systemctl list-unit-files "$service.service" >/dev/null 2>&1; then
@@ -85,4 +96,15 @@ restart_service() {
   else
     log_warn "Service unit not found, restart skipped: $service"
   fi
+}
+
+restart_service_any() {
+  local service
+  for service in "$@"; do
+    if systemctl list-unit-files "$service.service" >/dev/null 2>&1; then
+      restart_service "$service"
+      return 0
+    fi
+  done
+  log_warn "Service unit not found, restart skipped: $*"
 }

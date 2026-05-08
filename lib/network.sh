@@ -73,7 +73,23 @@ configure_resolv_conf() {
     [ -n "${DOMAIN:-}" ] && printf 'search %s\n' "$DOMAIN"
     [ -n "${RESOLV_OPTIONS:-timeout:2 attempts:3}" ] && printf 'options %s\n' "${RESOLV_OPTIONS:-timeout:2 attempts:3}"
     local dns seen_dns=" "
-    for dns in ${DNS_SERVERS:-}; do
+    local dns_servers="${DNS_SERVERS:-}"
+    case "${ROLE:-}" in
+      ISP)
+        dns_servers="8.8.8.8 77.88.8.8 $dns_servers"
+        ;;
+      HQ-SRV)
+        if { systemctl is-active --quiet bind9 2>/dev/null || systemctl is-active --quiet named 2>/dev/null; }; then
+          dns_servers="127.0.0.1 192.168.100.2 $dns_servers 8.8.8.8"
+        else
+          dns_servers="8.8.8.8 77.88.8.8 $dns_servers 127.0.0.1 192.168.100.2"
+        fi
+        ;;
+      *)
+        dns_servers="192.168.100.2 $dns_servers"
+        ;;
+    esac
+    for dns in $dns_servers; do
       case "$seen_dns" in
         *" $dns "*) continue ;;
       esac
@@ -97,6 +113,9 @@ render_interfaces_file() {
       iface="${item%%:*}"
       cfg="${item#*:}"
       [ -z "$iface" ] && continue
+      if [ -n "${INTERNET_IFACE:-}" ] && [ "$iface" = "$INTERNET_IFACE" ] && ! ip link show "$iface" >/dev/null 2>&1; then
+        continue
+      fi
       printf 'auto %s\n' "$iface"
       if [ "$cfg" = "dhcp" ]; then
         printf 'iface %s inet dhcp\n' "$iface"
@@ -149,11 +168,18 @@ route_parts() {
 render_interface_route_hooks() {
   local iface="$1"
   [ -n "${STATIC_ROUTES_IFACE:-}" ] || return 0
-  [ "$iface" = "$STATIC_ROUTES_IFACE" ] || return 0
   local route
   for route in ${STATIC_ROUTES:-}; do
     route_parts "$route"
     [ -z "$ROUTE_DEST" ] || [ -z "$ROUTE_VIA" ] || [ "$ROUTE_DEST" = "$ROUTE_VIA" ] && continue
+    if [ -n "$ROUTE_DEV" ]; then
+      [ "$iface" = "$ROUTE_DEV" ] || continue
+    else
+      case " $STATIC_ROUTES_IFACE " in
+        *" $iface "*) ;;
+        *) continue ;;
+      esac
+    fi
     printf '    up ip route replace %s via %s' "$ROUTE_DEST" "$ROUTE_VIA"
     [ -n "$ROUTE_DEV" ] && printf ' dev %s' "$ROUTE_DEV"
     printf ' || true\n'
@@ -277,6 +303,10 @@ set_ip_forward() {
     log_ok "IP forwarding sysctl configured"
   fi
   sysctl -w net.ipv4.ip_forward=1 >/dev/null
+  if [ -f /etc/sysctl.conf ] && ! grep -q '^net.ipv4.ip_forward=1$' /etc/sysctl.conf; then
+    sed -i 's/^[#[:space:]]*net\.ipv4\.ip_forward=.*/net.ipv4.ip_forward=1/' /etc/sysctl.conf
+    grep -q '^net.ipv4.ip_forward=1$' /etc/sysctl.conf || printf 'net.ipv4.ip_forward=1\n' >> /etc/sysctl.conf
+  fi
 }
 
 iptables_cmd() {
@@ -359,15 +389,43 @@ configure_nat() {
     log_warn "NAT_OUT_IFACE or NAT_LAN_CIDRS is empty. NAT skipped."
     return 0
   fi
+  local nat_lan_cidrs="$NAT_LAN_CIDRS"
+  if [ "${ROLE:-}" = "ISP" ]; then
+    case " $nat_lan_cidrs " in
+      *" 172.16.0.0/16 "*) ;;
+      *) nat_lan_cidrs="172.16.0.0/16 $nat_lan_cidrs" ;;
+    esac
+  fi
   local cidr
   local exclude
-  for cidr in $NAT_LAN_CIDRS; do
+  ensure_iptables_rule filter FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  for cidr in $nat_lan_cidrs; do
     for exclude in ${NAT_EXCLUDE_CIDRS:-}; do
       ensure_iptables_insert_rule nat POSTROUTING -s "$cidr" -d "$exclude" -j RETURN
     done
+    ensure_iptables_rule filter FORWARD -s "$cidr" -o "$NAT_OUT_IFACE" -j ACCEPT
     ensure_iptables_rule nat POSTROUTING -s "$cidr" -o "$NAT_OUT_IFACE" -j MASQUERADE
   done
   save_iptables_rules
+}
+
+ensure_default_route() {
+  [ -n "${DEFAULT_GW:-}" ] || return 0
+  local iface="${WAN_IFACE:-${LAN_IFACE:-}}"
+  [ -n "$iface" ] || return 0
+  if ! ip link show "$iface" >/dev/null 2>&1; then
+    log_warn "Default route interface is absent: $iface"
+    return 0
+  fi
+  local metric_args=()
+  [ -n "${DEFAULT_GW_METRIC:-}" ] && metric_args=(metric "$DEFAULT_GW_METRIC")
+  if ip route show default | grep -q "via $DEFAULT_GW"; then
+    log_skip "Default route exists: $DEFAULT_GW"
+  elif ip route replace default via "$DEFAULT_GW" dev "$iface" "${metric_args[@]}"; then
+    log_ok "Default route configured: $DEFAULT_GW dev $iface"
+  else
+    log_warn "Default route not ready: $DEFAULT_GW dev $iface"
+  fi
 }
 
 configure_static_routes() {

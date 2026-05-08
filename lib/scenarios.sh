@@ -68,7 +68,7 @@ set_module1_defaults() {
   BIND_NS_IP="192.168.100.2"
   BIND_ADMIN_NAME="admin"
   BIND_LISTEN_ON="any"
-  BIND_ALLOW_QUERY="127.0.0.1 192.168.100.0/28 192.168.200.0/27 192.168.255.0/28"
+  BIND_ALLOW_QUERY="127.0.0.1 192.168.100.0/28 192.168.200.0/27 192.168.250.0/29 192.168.255.0/28 172.16.0.0/16 10.0.0.0/30"
   BIND_FORWARDERS="77.88.8.7 77.88.8.3"
   BIND_FORWARD_RECORDS="hq-rtr:192.168.100.1 br-rtr:192.168.255.1 hq-srv:192.168.100.2 hq-cli:192.168.200.2 br-srv:192.168.255.2 docker:172.16.1.1 web:172.16.2.1"
   BIND_REVERSE_ZONES="100.168.192.in-addr.arpa:db.192.168.100 200.168.192.in-addr.arpa:db.192.168.200 255.168.192.in-addr.arpa:db.192.168.255"
@@ -76,9 +76,19 @@ set_module1_defaults() {
   SSH_HARDENING="no"
   SSH_PORT="22"
   SSH_PERMIT_ROOT_LOGIN="prohibit-password"
+  SSH_PASSWORD_AUTHENTICATION="yes"
   SSH_MAX_AUTH_TRIES=""
   SSH_ALLOW_USERS=""
   SSH_BANNER_TEXT=""
+  SSH_USER="sshuser"
+  SSH_USER_UID="2026"
+  SSH_PASSWORD="P@ssw0rd"
+  SSH_REMOTE_USER="remote_user"
+  SSH_SERVER_PORT="2026"
+  SSH_ROUTER_USER="net_admin"
+  SSH_ROUTER_PASSWORD="P@ssw0rd"
+  SSH_ROUTER_PORT="2026"
+  SSH_CLIENT_CONFIG="no"
 }
 
 save_scenario_config() {
@@ -97,7 +107,9 @@ save_scenario_config() {
     BIND_NS_NAME "$BIND_NS_NAME" BIND_NS_IP "$BIND_NS_IP" BIND_ADMIN_NAME "$BIND_ADMIN_NAME" BIND_LISTEN_ON "$BIND_LISTEN_ON" \
     BIND_ALLOW_QUERY "$BIND_ALLOW_QUERY" BIND_FORWARDERS "$BIND_FORWARDERS" BIND_FORWARD_RECORDS "$BIND_FORWARD_RECORDS" \
     BIND_REVERSE_ZONES "$BIND_REVERSE_ZONES" BIND_REVERSE_RECORDS "$BIND_REVERSE_RECORDS" \
-    SSH_HARDENING "$SSH_HARDENING" SSH_PORT "$SSH_PORT" SSH_PERMIT_ROOT_LOGIN "$SSH_PERMIT_ROOT_LOGIN" SSH_MAX_AUTH_TRIES "$SSH_MAX_AUTH_TRIES" SSH_ALLOW_USERS "$SSH_ALLOW_USERS" SSH_BANNER_TEXT "$SSH_BANNER_TEXT"
+    SSH_HARDENING "$SSH_HARDENING" SSH_PORT "$SSH_PORT" SSH_PERMIT_ROOT_LOGIN "$SSH_PERMIT_ROOT_LOGIN" SSH_PASSWORD_AUTHENTICATION "$SSH_PASSWORD_AUTHENTICATION" SSH_MAX_AUTH_TRIES "$SSH_MAX_AUTH_TRIES" \
+    SSH_ALLOW_USERS "$SSH_ALLOW_USERS" SSH_BANNER_TEXT "$SSH_BANNER_TEXT" SSH_USER "$SSH_USER" SSH_USER_UID "$SSH_USER_UID" SSH_PASSWORD "$SSH_PASSWORD" SSH_REMOTE_USER "$SSH_REMOTE_USER" SSH_SERVER_PORT "$SSH_SERVER_PORT" \
+    SSH_ROUTER_USER "$SSH_ROUTER_USER" SSH_ROUTER_PASSWORD "$SSH_ROUTER_PASSWORD" SSH_ROUTER_PORT "$SSH_ROUTER_PORT" SSH_CLIENT_CONFIG "$SSH_CLIENT_CONFIG"
   log_ok "Scenario config saved: $CONFIG_FILE"
 }
 
@@ -112,7 +124,7 @@ scenario_isp() {
   prompt_default ISP_BR_IP_CIDR "ISP IP toward BR-RTR" "172.16.2.1/28"
   prompt_default HQ_RTR_WAN_IP "HQ-RTR WAN IP for route checks" "172.16.1.2"
   prompt_default BR_RTR_WAN_IP "BR-RTR WAN IP for route checks" "172.16.2.2"
-  prompt_default NAT_LAN_CIDRS "Networks to NAT" "192.168.100.0/28 192.168.200.0/27 192.168.250.0/29 192.168.255.0/28"
+  prompt_default NAT_LAN_CIDRS "Networks to NAT" "172.16.0.0/16 192.168.100.0/28 192.168.200.0/27 192.168.250.0/29 192.168.255.0/28"
 
   INTERFACES="$WAN_IFACE $ISP_HQ_IFACE $ISP_BR_IFACE"
   LAN_IFACE=""
@@ -123,8 +135,8 @@ scenario_isp() {
   IP_FORWARD="yes"
   NAT_ENABLE="yes"
   NAT_OUT_IFACE="$WAN_IFACE"
-  STATIC_ROUTES="192.168.100.0/28:$HQ_RTR_WAN_IP 192.168.200.0/27:$HQ_RTR_WAN_IP 192.168.250.0/29:$HQ_RTR_WAN_IP 192.168.255.0/28:$BR_RTR_WAN_IP"
-  STATIC_ROUTES_IFACE="$ISP_BR_IFACE"
+  STATIC_ROUTES="192.168.100.0/28:$HQ_RTR_WAN_IP:$ISP_HQ_IFACE 192.168.200.0/27:$HQ_RTR_WAN_IP:$ISP_HQ_IFACE 192.168.250.0/29:$HQ_RTR_WAN_IP:$ISP_HQ_IFACE 192.168.255.0/28:$BR_RTR_WAN_IP:$ISP_BR_IFACE"
+  STATIC_ROUTES_IFACE="$ISP_HQ_IFACE $ISP_BR_IFACE"
   save_scenario_config
 }
 
@@ -142,6 +154,11 @@ scenario_hq_rtr() {
   prompt_default BR_RTR_WAN_IP "BR-RTR WAN IP for GRE/static route" "172.16.2.2"
   prompt_default INTERNET_IFACE "Extra DHCP Internet interface" "ens37"
   prompt_default DHCP_ENABLE "Enable DHCP for HQ-CLI network" "yes"
+  prompt_default SSH_ROUTER_USER "Router SSH user" "$SSH_ROUTER_USER"
+  prompt_default SSH_ROUTER_PASSWORD "Router SSH user password" "$SSH_ROUTER_PASSWORD"
+  prompt_default SSH_ROUTER_PORT "Router SSH port" "$SSH_ROUTER_PORT"
+  prompt_default SSH_USER "Additional router SSH user" "$SSH_USER"
+  prompt_default SSH_PASSWORD "Additional router SSH user password" "$SSH_PASSWORD"
 
   INTERNET_IFACE_METRIC="300"
   DEFAULT_GW_METRIC="100"
@@ -167,6 +184,13 @@ scenario_hq_rtr() {
   OSPF_NETWORKS="192.168.100.0/28 192.168.200.0/27 192.168.250.0/29 10.0.0.0/30"
   OSPF_ACTIVE_IFACES="$GRE_NAME"
   OSPF_AUTH_KEY="1c+rYtGm"
+  SSH_HARDENING="yes"
+  SSH_PORT="$SSH_ROUTER_PORT"
+  SSH_PERMIT_ROOT_LOGIN="no"
+  SSH_PASSWORD_AUTHENTICATION="yes"
+  SSH_MAX_AUTH_TRIES="2"
+  SSH_ALLOW_USERS="$SSH_ROUTER_USER $SSH_USER"
+  SSH_BANNER_TEXT="Authorized access only."
   if [ "$DHCP_ENABLE" = "yes" ]; then
     DHCP_IFACE="$LAN_IFACE.200"
     DHCP_SUBNET="192.168.200.0 netmask 255.255.255.224"
@@ -190,6 +214,11 @@ scenario_br_rtr() {
   prompt_default BR_RTR_LAN_IP_CIDR "BR LAN IP" "192.168.255.1/28"
   prompt_default HQ_RTR_WAN_IP "HQ-RTR WAN IP for GRE/static route" "172.16.1.2"
   prompt_default INTERNET_IFACE "Extra DHCP Internet interface" "ens37"
+  prompt_default SSH_ROUTER_USER "Router SSH user" "$SSH_ROUTER_USER"
+  prompt_default SSH_ROUTER_PASSWORD "Router SSH user password" "$SSH_ROUTER_PASSWORD"
+  prompt_default SSH_ROUTER_PORT "Router SSH port" "$SSH_ROUTER_PORT"
+  prompt_default SSH_USER "Additional router SSH user" "$SSH_USER"
+  prompt_default SSH_PASSWORD "Additional router SSH user password" "$SSH_PASSWORD"
 
   INTERNET_IFACE_METRIC="300"
   DEFAULT_GW_METRIC="100"
@@ -215,6 +244,13 @@ scenario_br_rtr() {
   OSPF_NETWORKS="192.168.255.0/28 10.0.0.0/30"
   OSPF_ACTIVE_IFACES="$GRE_NAME"
   OSPF_AUTH_KEY="1c+rYtGm"
+  SSH_HARDENING="yes"
+  SSH_PORT="$SSH_ROUTER_PORT"
+  SSH_PERMIT_ROOT_LOGIN="no"
+  SSH_PASSWORD_AUTHENTICATION="yes"
+  SSH_MAX_AUTH_TRIES="2"
+  SSH_ALLOW_USERS="$SSH_ROUTER_USER $SSH_USER"
+  SSH_BANNER_TEXT="Authorized access only."
   save_scenario_config
 }
 
@@ -230,6 +266,10 @@ scenario_hq_srv() {
   prompt_default DEFAULT_GW "Default gateway" "192.168.100.1"
   prompt_default INTERNET_IFACE "Extra DHCP Internet interface" "ens36"
   prompt_default BIND_ENABLE "Install and enable bind9 base package" "yes"
+  prompt_default SSH_USER "Server SSH user" "$SSH_USER"
+  prompt_default SSH_REMOTE_USER "Server additional user" "$SSH_REMOTE_USER"
+  prompt_default SSH_PASSWORD "Server SSH user password" "$SSH_PASSWORD"
+  prompt_default SSH_SERVER_PORT "Server SSH port" "$SSH_SERVER_PORT"
 
   INTERNET_IFACE_METRIC="50"
   DEFAULT_GW_METRIC="200"
@@ -250,10 +290,11 @@ scenario_hq_srv() {
   BIND_FORWARD_RECORDS="hq-rtr:$DEFAULT_GW br-rtr:192.168.255.1 hq-srv:$(cidr_ip "$HQ_SRV_IP_CIDR") hq-cli:192.168.200.2 br-srv:192.168.255.2 docker:172.16.1.1 web:172.16.2.1"
   BIND_REVERSE_RECORDS="100.168.192.in-addr.arpa:$(last_octet "$DEFAULT_GW"):hq-rtr 100.168.192.in-addr.arpa:$(last_octet "$HQ_SRV_IP_CIDR"):hq-srv 200.168.192.in-addr.arpa:2:hq-cli 255.168.192.in-addr.arpa:1:br-rtr 255.168.192.in-addr.arpa:2:br-srv"
   SSH_HARDENING="yes"
-  SSH_PORT="2026"
+  SSH_PORT="$SSH_SERVER_PORT"
   SSH_PERMIT_ROOT_LOGIN="no"
+  SSH_PASSWORD_AUTHENTICATION="yes"
   SSH_MAX_AUTH_TRIES="2"
-  SSH_ALLOW_USERS="sshuser"
+  SSH_ALLOW_USERS="$SSH_USER"
   SSH_BANNER_TEXT="Authorized access only."
   save_scenario_config
 }
@@ -266,6 +307,10 @@ scenario_br_srv() {
   prompt_default BR_SRV_IP_CIDR "BR-SRV IP" "192.168.255.2/28"
   prompt_default DEFAULT_GW "Default gateway" "192.168.255.1"
   prompt_default INTERNET_IFACE "Extra DHCP Internet interface" "ens36"
+  prompt_default SSH_USER "Server SSH user" "$SSH_USER"
+  prompt_default SSH_REMOTE_USER "Server additional user" "$SSH_REMOTE_USER"
+  prompt_default SSH_PASSWORD "Server SSH user password" "$SSH_PASSWORD"
+  prompt_default SSH_SERVER_PORT "Server SSH port" "$SSH_SERVER_PORT"
 
   INTERNET_IFACE_METRIC="50"
   DEFAULT_GW_METRIC="200"
@@ -278,10 +323,11 @@ scenario_br_srv() {
   STATIC_ROUTES_IFACE="$LAN_IFACE"
   NAT_OUT_IFACE=""
   SSH_HARDENING="yes"
-  SSH_PORT="2026"
+  SSH_PORT="$SSH_SERVER_PORT"
   SSH_PERMIT_ROOT_LOGIN="no"
+  SSH_PASSWORD_AUTHENTICATION="yes"
   SSH_MAX_AUTH_TRIES="2"
-  SSH_ALLOW_USERS="sshuser"
+  SSH_ALLOW_USERS="$SSH_USER"
   SSH_BANNER_TEXT="Authorized access only."
   save_scenario_config
 }
@@ -293,6 +339,10 @@ scenario_hq_cli() {
   prompt_default HQ_CLI_PARENT_IFACE "Physical trunk interface" "ens33"
   prompt_default HQ_CLI_VLAN_ID "HQ-CLI VLAN ID" "200"
   prompt_default IPV4_MODE "IPv4 mode: dhcp or static" "dhcp"
+  prompt_default SSH_USER "Server SSH user for client aliases" "$SSH_USER"
+  prompt_default SSH_SERVER_PORT "Server SSH port for client aliases" "$SSH_SERVER_PORT"
+  prompt_default SSH_ROUTER_USER "Router SSH user for client aliases" "$SSH_ROUTER_USER"
+  prompt_default SSH_ROUTER_PORT "Router SSH port for client aliases" "$SSH_ROUTER_PORT"
   LAN_IFACE="$HQ_CLI_PARENT_IFACE.$HQ_CLI_VLAN_ID"
   if [ "$IPV4_MODE" = "static" ]; then
     prompt_default HQ_CLI_IP_CIDR "HQ-CLI IP" "192.168.200.2/27"
@@ -309,5 +359,7 @@ scenario_hq_cli() {
   NEIGHBOR_IPS="${DEFAULT_GW:-192.168.200.1}"
   NAT_OUT_IFACE=""
   SSH_HARDENING="no"
+  SSH_PORT="$SSH_SERVER_PORT"
+  SSH_CLIENT_CONFIG="yes"
   save_scenario_config
 }

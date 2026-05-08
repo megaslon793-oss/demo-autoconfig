@@ -65,4 +65,17 @@ command_exists exportfs && run_diag "exportfs -v" exportfs -v || log_skip "expor
 command_exists chronyc && run_diag "chronyc sources" chronyc sources || log_skip "chronyc not installed"
 command_exists lpstat && run_diag "lpstat" lpstat -t || log_skip "lpstat not installed"
 
+case "${ROLE:-}" in
+  HQ-SRV|BR-SRV)
+    run_diag "user ${SSH_USER:-sshuser}" id "${SSH_USER:-sshuser}"
+    run_diag "user ${SSH_REMOTE_USER:-remote_user}" id "${SSH_REMOTE_USER:-remote_user}"
+    ;;
+  HQ-RTR|BR-RTR)
+    run_diag "user ${SSH_ROUTER_USER:-net_admin}" id "${SSH_ROUTER_USER:-net_admin}"
+    run_diag "user ${SSH_USER:-sshuser}" id "${SSH_USER:-sshuser}"
+    ;;
+esac
+
+[ -n "${SSH_PORT:-}" ] && command_exists ss && run_diag "ssh listen port ${SSH_PORT:-}" sh -c "ss -ltn | grep ':${SSH_PORT:-} '" || true
+
 log_ok "Diagnostics finished"
