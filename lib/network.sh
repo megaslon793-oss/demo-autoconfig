@@ -17,6 +17,13 @@ fqdn_hostname() {
   esac
 }
 
+vlan_parent_iface() {
+  local iface="${1:-}"
+  case "$iface" in
+    *.*) printf '%s' "${iface%.*}" ;;
+  esac
+}
+
 set_hostname_idempotent() {
   local new_hostname
   new_hostname="$(fqdn_hostname "${1:-}" "${DOMAIN:-}")"
@@ -93,8 +100,11 @@ render_interfaces_file() {
       cfg="${item#*:}"
       [ -z "$iface" ] && continue
       printf 'auto %s\n' "$iface"
+      local parent
+      parent="$(vlan_parent_iface "$iface")"
       if [ "$cfg" = "dhcp" ]; then
         printf 'iface %s inet dhcp\n' "$iface"
+        [ -n "$parent" ] && printf '    pre-up ip link set %s up || true\n' "$parent"
         local metric
         metric="$(interface_metric "$iface")"
         [ -n "$metric" ] && printf '    metric %s\n' "$metric"
@@ -102,10 +112,12 @@ render_interfaces_file() {
         printf '\n'
       elif [ "$cfg" = "manual" ]; then
         printf 'iface %s inet manual\n' "$iface"
+        printf '    up ip link set %s up || true\n' "$iface"
         render_interface_route_hooks "$iface"
         printf '\n'
       elif [ -n "$cfg" ]; then
         printf 'iface %s inet static\n' "$iface"
+        [ -n "$parent" ] && printf '    pre-up ip link set %s up || true\n' "$parent"
         printf '    address %s\n' "$cfg"
         if [ "$iface" = "${WAN_IFACE:-}" ] || [ "$iface" = "${LAN_IFACE:-}" ]; then
           [ -n "${DEFAULT_GW:-}" ] && [ "$iface" = "${WAN_IFACE:-}" ] && printf '    gateway %s\n' "$DEFAULT_GW"
@@ -151,7 +163,7 @@ render_interface_route_hooks() {
     [ -z "$ROUTE_DEST" ] || [ -z "$ROUTE_VIA" ] || [ "$ROUTE_DEST" = "$ROUTE_VIA" ] && continue
     printf '    up ip route replace %s via %s' "$ROUTE_DEST" "$ROUTE_VIA"
     [ -n "$ROUTE_DEV" ] && printf ' dev %s' "$ROUTE_DEV"
-    printf '\n'
+    printf ' || true\n'
   done
 }
 
@@ -212,7 +224,7 @@ render_gre_interfaces_stanza() {
   for route in ${GRE_ROUTES:-}; do
     route_parts "$route"
     [ -z "$ROUTE_DEST" ] || [ -z "$ROUTE_VIA" ] || [ "$ROUTE_DEST" = "$ROUTE_VIA" ] && continue
-    printf '    post-up ip route replace %s via %s dev %s\n' "$ROUTE_DEST" "$ROUTE_VIA" "${GRE_NAME:-gre30}"
+    printf '    post-up ip route replace %s via %s dev %s || true\n' "$ROUTE_DEST" "$ROUTE_VIA" "${GRE_NAME:-gre30}"
   done
   printf '\n'
 }
