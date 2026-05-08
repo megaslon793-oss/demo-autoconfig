@@ -4,6 +4,53 @@ pkg_installed() {
   dpkg -s "$1" 2>/dev/null | grep -qx 'Status: install ok installed'
 }
 
+stop_packagekit_for_apt() {
+  if command_exists systemctl && systemctl list-unit-files packagekit.service >/dev/null 2>&1; then
+    if systemctl is-active --quiet packagekit 2>/dev/null; then
+      log_warn "packagekit.service is active and can hold dpkg lock; stopping it before apt"
+      systemctl stop packagekit 2>/dev/null || true
+      sleep 2
+    fi
+  fi
+}
+
+apt_get_retry() {
+  local attempt=1
+  local max_attempts="${APT_RETRIES:-4}"
+  local lock_timeout="${APT_LOCK_TIMEOUT:-180}"
+  local rc=0
+  local tmp
+  tmp="$(mktemp)"
+
+  while [ "$attempt" -le "$max_attempts" ]; do
+    stop_packagekit_for_apt
+    log_ok "apt-get $* (attempt $attempt/$max_attempts)"
+    set +e
+    DEBIAN_FRONTEND=noninteractive apt-get -o "DPkg::Lock::Timeout=$lock_timeout" "$@" >"$tmp" 2>&1
+    rc=$?
+    set -e
+    cat "$tmp"
+    if [ "$rc" -eq 0 ]; then
+      rm -f "$tmp"
+      return 0
+    fi
+
+    if grep -qiE 'lock-frontend|Could not get lock|Unable to acquire|dpkg frontend lock|packagekitd' "$tmp"; then
+      log_warn "apt/dpkg lock is busy. Waiting before retry..."
+      sleep 10
+      attempt=$((attempt + 1))
+      continue
+    fi
+
+    rm -f "$tmp"
+    return "$rc"
+  done
+
+  rm -f "$tmp"
+  log_error "apt-get failed after waiting for dpkg lock"
+  return "$rc"
+}
+
 install_packages() {
   local missing=()
   local pkg
@@ -25,8 +72,8 @@ install_packages() {
   fi
 
   log_ok "Installing packages: ${missing[*]}"
-  DEBIAN_FRONTEND=noninteractive apt-get update
-  DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}"
+  apt_get_retry update
+  apt_get_retry install -y "${missing[@]}"
 }
 
 install_packages_no_autostart() {
