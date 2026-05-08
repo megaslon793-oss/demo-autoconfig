@@ -71,8 +71,12 @@ command_exists() {
 confirm() {
   local prompt="$1"
   local answer
-  read -r -p "$prompt [yes/NO]: " answer
-  [ "$answer" = "yes" ]
+  read -r -p "$prompt [yes]: " answer
+  answer="${answer:-yes}"
+  case "$answer" in
+    yes|y|Y|YES|Yes|da|DA|Da) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 write_kv_config() {

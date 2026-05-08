@@ -279,12 +279,45 @@ set_ip_forward() {
   sysctl -w net.ipv4.ip_forward=1 >/dev/null
 }
 
+iptables_cmd() {
+  if [ -n "${IPTABLES_BIN:-}" ] && [ -x "$IPTABLES_BIN" ]; then
+    printf '%s' "$IPTABLES_BIN"
+    return 0
+  fi
+  command -v iptables 2>/dev/null && return 0
+  [ -x /usr/sbin/iptables ] && { printf '/usr/sbin/iptables'; return 0; }
+  [ -x /sbin/iptables ] && { printf '/sbin/iptables'; return 0; }
+  return 1
+}
+
+iptables_save_cmd() {
+  if [ -n "${IPTABLES_SAVE_BIN:-}" ] && [ -x "$IPTABLES_SAVE_BIN" ]; then
+    printf '%s' "$IPTABLES_SAVE_BIN"
+    return 0
+  fi
+  command -v iptables-save 2>/dev/null && return 0
+  [ -x /usr/sbin/iptables-save ] && { printf '/usr/sbin/iptables-save'; return 0; }
+  [ -x /sbin/iptables-save ] && { printf '/sbin/iptables-save'; return 0; }
+  return 1
+}
+
+ensure_iptables_available() {
+  if ! IPTABLES_BIN="$(iptables_cmd)"; then
+    install_packages iptables || { log_error "Could not install package: iptables"; return 1; }
+    IPTABLES_BIN="$(iptables_cmd)" || { log_error "iptables not found after package install"; return 1; }
+  fi
+  IPTABLES_SAVE_BIN="$(iptables_save_cmd)" || log_warn "iptables-save not found; NAT rules will not be persisted"
+  install_packages iptables-persistent netfilter-persistent || log_warn "Persistent iptables packages were not installed; NAT rules still applied for current boot"
+}
+
 ensure_iptables_rule() {
   local table="$1"; shift
-  if /usr/sbin/iptables -t "$table" -C "$@" 2>/dev/null; then
+  local iptables="${IPTABLES_BIN:-}"
+  [ -n "$iptables" ] || { iptables="$(iptables_cmd)" || return 1; }
+  if "$iptables" -t "$table" -C "$@" 2>/dev/null; then
     log_skip "iptables rule exists: -t $table $*"
   else
-    /usr/sbin/iptables -t "$table" -A "$@"
+    "$iptables" -t "$table" -A "$@"
     log_ok "iptables rule added: -t $table $*"
   fi
 }
@@ -292,30 +325,36 @@ ensure_iptables_rule() {
 ensure_iptables_insert_rule() {
   local table="$1"; shift
   local chain="$1"; shift
-  if /usr/sbin/iptables -t "$table" -C "$chain" "$@" 2>/dev/null; then
+  local iptables="${IPTABLES_BIN:-}"
+  [ -n "$iptables" ] || { iptables="$(iptables_cmd)" || return 1; }
+  if "$iptables" -t "$table" -C "$chain" "$@" 2>/dev/null; then
     log_skip "iptables rule exists: -t $table $chain $*"
   else
-    /usr/sbin/iptables -t "$table" -I "$chain" 1 "$@"
+    "$iptables" -t "$table" -I "$chain" 1 "$@"
     log_ok "iptables rule inserted: -t $table $chain $*"
   fi
 }
 
 save_iptables_rules() {
-  mkdir -p /etc/demo-autoconfig
-  /usr/sbin/iptables-save > /etc/demo-autoconfig/iptables.rules
+  local iptables_save="${IPTABLES_SAVE_BIN:-}"
+  [ -n "$iptables_save" ] || iptables_save="$(iptables_save_cmd || true)"
+  if [ -z "$iptables_save" ]; then
+    log_warn "iptables-save not found. NAT rules are active but not saved."
+    return 0
+  fi
+  mkdir -p /etc/demo-autoconfig /etc/iptables
+  "$iptables_save" > /etc/demo-autoconfig/iptables.rules
+  "$iptables_save" > /etc/iptables/rules.v4
   if command_exists netfilter-persistent; then
     netfilter-persistent save || log_warn "netfilter-persistent save failed"
   else
-    log_warn "netfilter-persistent not installed. Rules saved to /etc/demo-autoconfig/iptables.rules"
+    log_warn "netfilter-persistent not installed. Rules saved to /etc/iptables/rules.v4"
   fi
 }
 
 configure_nat() {
   [ "${NAT_ENABLE:-no}" = "yes" ] || { log_skip "NAT disabled by config"; return 0; }
-  if [ ! -x /usr/sbin/iptables ]; then
-    install_packages iptables iptables-persistent || true
-  fi
-  [ -x /usr/sbin/iptables ] || { log_error "/usr/sbin/iptables not found. Install package: iptables"; return 1; }
+  ensure_iptables_available || return 1
   if [ -z "${NAT_OUT_IFACE:-}" ] || [ -z "${NAT_LAN_CIDRS:-}" ]; then
     log_warn "NAT_OUT_IFACE or NAT_LAN_CIDRS is empty. NAT skipped."
     return 0
