@@ -43,6 +43,18 @@ check_connectivity() {
   done
 }
 
+default_hostname_for_role() {
+  case "$1" in
+    ISP) printf 'isp' ;;
+    HQ-RTR) printf 'hq-rtr' ;;
+    BR-RTR) printf 'br-rtr' ;;
+    HQ-SRV) printf 'hq-srv' ;;
+    BR-SRV) printf 'br-srv' ;;
+    HQ-CLI) printf 'hq-cli' ;;
+    *) printf '%s' "$1" | tr '[:upper:]' '[:lower:]' ;;
+  esac
+}
+
 create_config() {
   local old_role="" old_hostname="" old_domain=""
   if [ -f "$CONFIG_FILE" ]; then
@@ -59,8 +71,9 @@ create_config() {
   fi
 
   prompt_choice ROLE "Device role" ISP HQ-RTR BR-RTR HQ-SRV BR-SRV HQ-CLI
-  prompt_required HOSTNAME "Hostname"
-  prompt_default DOMAIN "Domain" "${old_domain:-demo.local}"
+  prompt_default DOMAIN "Domain" "${old_domain:-au-team.irpo}"
+  prompt_default HOSTNAME "Hostname (FQDN)" "$(fqdn_hostname "${old_hostname:-$(default_hostname_for_role "$ROLE")}" "$DOMAIN")"
+  HOSTNAME="$(fqdn_hostname "$HOSTNAME" "$DOMAIN")"
   prompt_default ISO_PATH "Path to Additional.iso or mounted ISO directory" ""
   prompt_default ISO_MOUNTPOINT "ISO mountpoint" "/mnt/additional"
   prompt_choice LOCK_RESOLV_CONF "Lock /etc/resolv.conf with chattr +i" yes no

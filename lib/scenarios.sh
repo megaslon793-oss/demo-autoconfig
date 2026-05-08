@@ -6,8 +6,9 @@ cidr_ip() {
 
 ask_role_common() {
   local default_hostname="$1"
-  prompt_default HOSTNAME "Hostname" "$default_hostname"
   prompt_default DOMAIN "Domain" "au-team.irpo"
+  prompt_default HOSTNAME "Hostname (FQDN)" "$(fqdn_hostname "$default_hostname" "$DOMAIN")"
+  HOSTNAME="$(fqdn_hostname "$HOSTNAME" "$DOMAIN")"
   prompt_default DNS_SERVERS "DNS servers separated by spaces" "8.8.8.8 192.168.100.2"
   prompt_default INTERNET_TEST_IP "Internet test IP" "8.8.8.8"
 }
