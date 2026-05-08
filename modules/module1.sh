@@ -30,9 +30,35 @@ require_dhcp_value() {
   fi
 }
 
+dhcpd_cmd() {
+  command -v dhcpd 2>/dev/null && return 0
+  [ -x /usr/sbin/dhcpd ] && { printf '/usr/sbin/dhcpd'; return 0; }
+  [ -x /sbin/dhcpd ] && { printf '/sbin/dhcpd'; return 0; }
+  return 1
+}
+
+ensure_dhcp_interface_ready() {
+  local iface="$1"
+  local parent="${iface%.*}"
+  if ip -4 addr show dev "$iface" 2>/dev/null | grep -q 'inet '; then
+    return 0
+  fi
+  if command_exists ifup; then
+    if [ "$parent" != "$iface" ]; then
+      ifup "$parent" 2>/dev/null || true
+    fi
+    ifup "$iface" 2>/dev/null || true
+  fi
+  if ip -4 addr show dev "$iface" 2>/dev/null | grep -q 'inet '; then
+    return 0
+  fi
+  log_error "DHCP interface has no IPv4 address: $iface. Apply /etc/network/interfaces before starting isc-dhcp-server."
+  return 1
+}
+
 configure_dhcp() {
   [ "${DHCP_ENABLE:-no}" = "yes" ] || { log_skip "DHCP disabled by config"; return 0; }
-  install_packages isc-dhcp-server
+  install_packages_no_autostart isc-dhcp-server
   backup_file /etc/default/isc-dhcp-server
 
   require_dhcp_value DHCP_IFACE
@@ -66,13 +92,17 @@ configure_dhcp() {
     printf '}\n'
   } > /etc/dhcp/dhcpd.conf
 
-  if command_exists dhcpd; then
-    if ! dhcpd -t -cf /etc/dhcp/dhcpd.conf; then
+  local dhcpd_bin
+  if dhcpd_bin="$(dhcpd_cmd)"; then
+    if ! "$dhcpd_bin" -t -cf /etc/dhcp/dhcpd.conf; then
       log_error "dhcpd config validation failed: /etc/dhcp/dhcpd.conf"
       return 1
     fi
+  else
+    log_warn "dhcpd binary not found; DHCP config syntax check skipped"
   fi
 
+  ensure_dhcp_interface_ready "$DHCP_IFACE"
   enable_service isc-dhcp-server
   restart_service isc-dhcp-server
 }
@@ -413,13 +443,13 @@ main() {
   set_ip_forward "$forward"
 
   configure_nat
+  apply_networking_changes
   configure_static_routes
   configure_gre
   configure_frr_ospf
   configure_dhcp
   configure_bind_base
   configure_ssh_service
-  apply_networking_changes
   reconcile_routing_after_network_restart
   post_checks
 }

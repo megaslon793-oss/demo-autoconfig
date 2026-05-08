@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 pkg_installed() {
-  dpkg -s "$1" >/dev/null 2>&1
+  dpkg -s "$1" 2>/dev/null | grep -qx 'Status: install ok installed'
 }
 
 install_packages() {
@@ -27,6 +27,40 @@ install_packages() {
   log_ok "Installing packages: ${missing[*]}"
   DEBIAN_FRONTEND=noninteractive apt-get update
   DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}"
+}
+
+install_packages_no_autostart() {
+  local policy="/usr/sbin/policy-rc.d"
+  local backup=""
+  local existed="no"
+  local rc
+
+  mkdir -p "$TMP_DIR"
+  if [ -e "$policy" ]; then
+    existed="yes"
+    backup="$TMP_DIR/policy-rc.d.$$.bak"
+    cp -a "$policy" "$backup"
+  fi
+
+  {
+    printf '#!/bin/sh\n'
+    printf 'exit 101\n'
+  } > "$policy"
+  chmod 755 "$policy"
+
+  set +e
+  install_packages "$@"
+  rc=$?
+  set -e
+
+  if [ "$existed" = "yes" ]; then
+    cp -a "$backup" "$policy"
+    rm -f "$backup"
+  else
+    rm -f "$policy"
+  fi
+
+  return "$rc"
 }
 
 enable_service() {
