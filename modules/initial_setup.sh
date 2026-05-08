@@ -77,6 +77,7 @@ create_config() {
   prompt_default ISO_PATH "Path to Additional.iso or mounted ISO directory" ""
   prompt_default ISO_MOUNTPOINT "ISO mountpoint" "/mnt/additional"
   prompt_choice LOCK_RESOLV_CONF "Lock /etc/resolv.conf with chattr +i" yes no
+  prompt_default NETWORK_APPLY_ACTION "Apply networking at end: restart/reboot/no" "restart"
 
   prompt_default INTERFACES "Interface names separated by spaces" ""
   prompt_default WAN_IFACE "WAN/upstream interface" ""
@@ -142,7 +143,7 @@ create_config() {
 
   write_kv_config "$CONFIG_FILE" \
     ROLE "$ROLE" HOSTNAME "$HOSTNAME" DOMAIN "$DOMAIN" \
-    ISO_PATH "$ISO_PATH" ISO_MOUNTPOINT "$ISO_MOUNTPOINT" LOCK_RESOLV_CONF "$LOCK_RESOLV_CONF" \
+    ISO_PATH "$ISO_PATH" ISO_MOUNTPOINT "$ISO_MOUNTPOINT" LOCK_RESOLV_CONF "$LOCK_RESOLV_CONF" NETWORK_APPLY_ACTION "$NETWORK_APPLY_ACTION" \
     INTERFACES "$INTERFACES" WAN_IFACE "$WAN_IFACE" LAN_IFACE "$LAN_IFACE" MGMT_IFACE "$MGMT_IFACE" \
     IPV4_CONFIGS "$IPV4_CONFIGS" DEFAULT_GW "$DEFAULT_GW" DNS_SERVERS "$DNS_SERVERS" HOSTS_ENTRIES "$HOSTS_ENTRIES" \
     NEIGHBOR_IPS "$NEIGHBOR_IPS" INTERNET_TEST_IP "$INTERNET_TEST_IP" \

@@ -80,6 +80,42 @@ configure_ssh_hardening() {
   fi
 }
 
+apply_networking_changes() {
+  case "${NETWORK_APPLY_ACTION:-restart}" in
+    restart|yes)
+      if command_exists systemctl && systemctl list-unit-files networking.service >/dev/null 2>&1; then
+        if systemctl restart networking; then
+          log_ok "Networking restarted"
+        else
+          log_warn "systemctl restart networking failed"
+        fi
+      elif command_exists service; then
+        if service networking restart; then
+          log_ok "Networking restarted"
+        else
+          log_warn "service networking restart failed"
+        fi
+      else
+        log_warn "Could not restart networking: systemctl/service not found"
+      fi
+      ;;
+    reboot)
+      log_warn "Reboot requested by NETWORK_APPLY_ACTION=reboot"
+      if command_exists systemctl; then
+        systemctl reboot
+      else
+        reboot
+      fi
+      ;;
+    no|skip|none)
+      log_skip "Networking restart disabled by config"
+      ;;
+    *)
+      log_warn "Unknown NETWORK_APPLY_ACTION=${NETWORK_APPLY_ACTION}. Networking restart skipped."
+      ;;
+  esac
+}
+
 post_checks() {
   log_ok "Module 1 checks"
   ip -br addr || true
@@ -113,6 +149,7 @@ main() {
   configure_dhcp
   configure_bind_base
   configure_ssh_hardening
+  apply_networking_changes
   post_checks
 }
 
