@@ -2,7 +2,7 @@
 
 validate_role() {
   case "$1" in
-    ISP|HQ-RTR|BR-RTR|HQ-SRV|BR-SRV|HQ-CLI|HQ-SW) return 0 ;;
+    ISP|HQ-RTR|BR-RTR|HQ-SRV|BR-SRV|HQ-CLI) return 0 ;;
     *) log_error "Unsupported role: $1"; return 1 ;;
   esac
 }

@@ -47,7 +47,6 @@ curl -fsSL https://raw.githubusercontent.com/megaslon793-oss/demo-autoconfig/mai
 - `HQ-SRV`
 - `BR-SRV`
 - `HQ-CLI`
-- `HQ-SW`
 
 ## Реализовано
 

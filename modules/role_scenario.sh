@@ -15,6 +15,9 @@ case "$ROLE_SCENARIO" in
   ISP) scenario_isp ;;
   HQ-RTR) scenario_hq_rtr ;;
   BR-RTR) scenario_br_rtr ;;
+  HQ-SRV) scenario_hq_srv ;;
+  BR-SRV) scenario_br_srv ;;
+  HQ-CLI) scenario_hq_cli ;;
   *) log_error "Unknown role scenario: $ROLE_SCENARIO"; exit 1 ;;
 esac
 

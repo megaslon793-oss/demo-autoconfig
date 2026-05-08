@@ -58,7 +58,7 @@ create_config() {
     backup_file "$CONFIG_FILE"
   fi
 
-  prompt_choice ROLE "Device role" ISP HQ-RTR BR-RTR HQ-SRV BR-SRV HQ-CLI HQ-SW
+  prompt_choice ROLE "Device role" ISP HQ-RTR BR-RTR HQ-SRV BR-SRV HQ-CLI
   prompt_required HOSTNAME "Hostname"
   prompt_default DOMAIN "Domain" "${old_domain:-demo.local}"
   prompt_default ISO_PATH "Path to Additional.iso or mounted ISO directory" ""

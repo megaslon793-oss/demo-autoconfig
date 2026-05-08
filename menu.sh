@@ -24,7 +24,7 @@ version: VERSION_PLACEHOLDER
 6. Cleanup temporary files
 0. Exit
 
-Quick scenarios: ISP, HQ-RTR, BR-RTR
+Quick scenarios: ISP, HQ-RTR, BR-RTR, HQ-SRV, BR-SRV, HQ-CLI
 MENU
 }
 
@@ -49,6 +49,9 @@ while true; do
     ISP|isp) export ROLE_SCENARIO="ISP"; run_module role_scenario.sh; unset ROLE_SCENARIO ;;
     HQ-RTR|hq-rtr) export ROLE_SCENARIO="HQ-RTR"; run_module role_scenario.sh; unset ROLE_SCENARIO ;;
     BR-RTR|br-rtr) export ROLE_SCENARIO="BR-RTR"; run_module role_scenario.sh; unset ROLE_SCENARIO ;;
+    HQ-SRV|hq-srv) export ROLE_SCENARIO="HQ-SRV"; run_module role_scenario.sh; unset ROLE_SCENARIO ;;
+    BR-SRV|br-srv) export ROLE_SCENARIO="BR-SRV"; run_module role_scenario.sh; unset ROLE_SCENARIO ;;
+    HQ-CLI|hq-cli) export ROLE_SCENARIO="HQ-CLI"; run_module role_scenario.sh; unset ROLE_SCENARIO ;;
     0) log_ok "Exit"; exit 0 ;;
     *) log_warn "Unknown option: $choice" ;;
   esac
