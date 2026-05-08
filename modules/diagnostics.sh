@@ -68,11 +68,11 @@ command_exists lpstat && run_diag "lpstat" lpstat -t || log_skip "lpstat not ins
 case "${ROLE:-}" in
   HQ-SRV|BR-SRV)
     run_diag "user ${SSH_USER:-sshuser}" id "${SSH_USER:-sshuser}"
-    run_diag "user ${SSH_REMOTE_USER:-remote_user}" id "${SSH_REMOTE_USER:-remote_user}"
+    run_diag "user ${SSH_REMOTE_USER:-user}" id "${SSH_REMOTE_USER:-user}"
     ;;
   HQ-RTR|BR-RTR)
+    run_diag "user ${SSH_ROUTER_EXTRA_USER:-user}" id "${SSH_ROUTER_EXTRA_USER:-user}"
     run_diag "user ${SSH_ROUTER_USER:-net_admin}" id "${SSH_ROUTER_USER:-net_admin}"
-    run_diag "user ${SSH_USER:-sshuser}" id "${SSH_USER:-sshuser}"
     ;;
 esac
 

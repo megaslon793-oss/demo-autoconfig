@@ -83,10 +83,13 @@ set_module1_defaults() {
   SSH_USER="sshuser"
   SSH_USER_UID="2026"
   SSH_PASSWORD="P@ssw0rd"
-  SSH_REMOTE_USER="remote_user"
+  SSH_REMOTE_USER="user"
+  SSH_REMOTE_PASSWORD="P@ssw0rd"
   SSH_SERVER_PORT="2026"
   SSH_ROUTER_USER="net_admin"
   SSH_ROUTER_PASSWORD="P@ssw0rd"
+  SSH_ROUTER_EXTRA_USER="user"
+  SSH_ROUTER_EXTRA_PASSWORD="P@ssw0rd"
   SSH_ROUTER_PORT="2026"
   SSH_CLIENT_CONFIG="no"
 }
@@ -108,8 +111,8 @@ save_scenario_config() {
     BIND_ALLOW_QUERY "$BIND_ALLOW_QUERY" BIND_FORWARDERS "$BIND_FORWARDERS" BIND_FORWARD_RECORDS "$BIND_FORWARD_RECORDS" \
     BIND_REVERSE_ZONES "$BIND_REVERSE_ZONES" BIND_REVERSE_RECORDS "$BIND_REVERSE_RECORDS" \
     SSH_HARDENING "$SSH_HARDENING" SSH_PORT "$SSH_PORT" SSH_PERMIT_ROOT_LOGIN "$SSH_PERMIT_ROOT_LOGIN" SSH_PASSWORD_AUTHENTICATION "$SSH_PASSWORD_AUTHENTICATION" SSH_MAX_AUTH_TRIES "$SSH_MAX_AUTH_TRIES" \
-    SSH_ALLOW_USERS "$SSH_ALLOW_USERS" SSH_BANNER_TEXT "$SSH_BANNER_TEXT" SSH_USER "$SSH_USER" SSH_USER_UID "$SSH_USER_UID" SSH_PASSWORD "$SSH_PASSWORD" SSH_REMOTE_USER "$SSH_REMOTE_USER" SSH_SERVER_PORT "$SSH_SERVER_PORT" \
-    SSH_ROUTER_USER "$SSH_ROUTER_USER" SSH_ROUTER_PASSWORD "$SSH_ROUTER_PASSWORD" SSH_ROUTER_PORT "$SSH_ROUTER_PORT" SSH_CLIENT_CONFIG "$SSH_CLIENT_CONFIG"
+    SSH_ALLOW_USERS "$SSH_ALLOW_USERS" SSH_BANNER_TEXT "$SSH_BANNER_TEXT" SSH_USER "$SSH_USER" SSH_USER_UID "$SSH_USER_UID" SSH_PASSWORD "$SSH_PASSWORD" SSH_REMOTE_USER "$SSH_REMOTE_USER" SSH_REMOTE_PASSWORD "$SSH_REMOTE_PASSWORD" SSH_SERVER_PORT "$SSH_SERVER_PORT" \
+    SSH_ROUTER_USER "$SSH_ROUTER_USER" SSH_ROUTER_PASSWORD "$SSH_ROUTER_PASSWORD" SSH_ROUTER_EXTRA_USER "$SSH_ROUTER_EXTRA_USER" SSH_ROUTER_EXTRA_PASSWORD "$SSH_ROUTER_EXTRA_PASSWORD" SSH_ROUTER_PORT "$SSH_ROUTER_PORT" SSH_CLIENT_CONFIG "$SSH_CLIENT_CONFIG"
   log_ok "Scenario config saved: $CONFIG_FILE"
 }
 
@@ -157,8 +160,8 @@ scenario_hq_rtr() {
   prompt_default SSH_ROUTER_USER "Router SSH user" "$SSH_ROUTER_USER"
   prompt_default SSH_ROUTER_PASSWORD "Router SSH user password" "$SSH_ROUTER_PASSWORD"
   prompt_default SSH_ROUTER_PORT "Router SSH port" "$SSH_ROUTER_PORT"
-  prompt_default SSH_USER "Additional router SSH user" "$SSH_USER"
-  prompt_default SSH_PASSWORD "Additional router SSH user password" "$SSH_PASSWORD"
+  prompt_default SSH_ROUTER_EXTRA_USER "Router regular user" "$SSH_ROUTER_EXTRA_USER"
+  prompt_default SSH_ROUTER_EXTRA_PASSWORD "Router regular user password" "$SSH_ROUTER_EXTRA_PASSWORD"
 
   INTERNET_IFACE_METRIC="300"
   DEFAULT_GW_METRIC="100"
@@ -189,7 +192,7 @@ scenario_hq_rtr() {
   SSH_PERMIT_ROOT_LOGIN="no"
   SSH_PASSWORD_AUTHENTICATION="yes"
   SSH_MAX_AUTH_TRIES="2"
-  SSH_ALLOW_USERS="$SSH_ROUTER_USER $SSH_USER"
+  SSH_ALLOW_USERS="$SSH_ROUTER_EXTRA_USER $SSH_ROUTER_USER"
   SSH_BANNER_TEXT="Authorized access only."
   if [ "$DHCP_ENABLE" = "yes" ]; then
     DHCP_IFACE="$LAN_IFACE.200"
@@ -217,8 +220,8 @@ scenario_br_rtr() {
   prompt_default SSH_ROUTER_USER "Router SSH user" "$SSH_ROUTER_USER"
   prompt_default SSH_ROUTER_PASSWORD "Router SSH user password" "$SSH_ROUTER_PASSWORD"
   prompt_default SSH_ROUTER_PORT "Router SSH port" "$SSH_ROUTER_PORT"
-  prompt_default SSH_USER "Additional router SSH user" "$SSH_USER"
-  prompt_default SSH_PASSWORD "Additional router SSH user password" "$SSH_PASSWORD"
+  prompt_default SSH_ROUTER_EXTRA_USER "Router regular user" "$SSH_ROUTER_EXTRA_USER"
+  prompt_default SSH_ROUTER_EXTRA_PASSWORD "Router regular user password" "$SSH_ROUTER_EXTRA_PASSWORD"
 
   INTERNET_IFACE_METRIC="300"
   DEFAULT_GW_METRIC="100"
@@ -249,7 +252,7 @@ scenario_br_rtr() {
   SSH_PERMIT_ROOT_LOGIN="no"
   SSH_PASSWORD_AUTHENTICATION="yes"
   SSH_MAX_AUTH_TRIES="2"
-  SSH_ALLOW_USERS="$SSH_ROUTER_USER $SSH_USER"
+  SSH_ALLOW_USERS="$SSH_ROUTER_EXTRA_USER $SSH_ROUTER_USER"
   SSH_BANNER_TEXT="Authorized access only."
   save_scenario_config
 }
@@ -267,7 +270,8 @@ scenario_hq_srv() {
   prompt_default INTERNET_IFACE "Extra DHCP Internet interface" "ens36"
   prompt_default BIND_ENABLE "Install and enable bind9 base package" "yes"
   prompt_default SSH_USER "Server SSH user" "$SSH_USER"
-  prompt_default SSH_REMOTE_USER "Server additional user" "$SSH_REMOTE_USER"
+  prompt_default SSH_REMOTE_USER "Server regular user" "$SSH_REMOTE_USER"
+  prompt_default SSH_REMOTE_PASSWORD "Server regular user password" "$SSH_REMOTE_PASSWORD"
   prompt_default SSH_PASSWORD "Server SSH user password" "$SSH_PASSWORD"
   prompt_default SSH_SERVER_PORT "Server SSH port" "$SSH_SERVER_PORT"
 
@@ -294,7 +298,7 @@ scenario_hq_srv() {
   SSH_PERMIT_ROOT_LOGIN="no"
   SSH_PASSWORD_AUTHENTICATION="yes"
   SSH_MAX_AUTH_TRIES="2"
-  SSH_ALLOW_USERS="$SSH_USER"
+  SSH_ALLOW_USERS="$SSH_REMOTE_USER $SSH_USER"
   SSH_BANNER_TEXT="Authorized access only."
   save_scenario_config
 }
@@ -308,7 +312,8 @@ scenario_br_srv() {
   prompt_default DEFAULT_GW "Default gateway" "192.168.255.1"
   prompt_default INTERNET_IFACE "Extra DHCP Internet interface" "ens36"
   prompt_default SSH_USER "Server SSH user" "$SSH_USER"
-  prompt_default SSH_REMOTE_USER "Server additional user" "$SSH_REMOTE_USER"
+  prompt_default SSH_REMOTE_USER "Server regular user" "$SSH_REMOTE_USER"
+  prompt_default SSH_REMOTE_PASSWORD "Server regular user password" "$SSH_REMOTE_PASSWORD"
   prompt_default SSH_PASSWORD "Server SSH user password" "$SSH_PASSWORD"
   prompt_default SSH_SERVER_PORT "Server SSH port" "$SSH_SERVER_PORT"
 
@@ -327,7 +332,7 @@ scenario_br_srv() {
   SSH_PERMIT_ROOT_LOGIN="no"
   SSH_PASSWORD_AUTHENTICATION="yes"
   SSH_MAX_AUTH_TRIES="2"
-  SSH_ALLOW_USERS="$SSH_USER"
+  SSH_ALLOW_USERS="$SSH_REMOTE_USER $SSH_USER"
   SSH_BANNER_TEXT="Authorized access only."
   save_scenario_config
 }

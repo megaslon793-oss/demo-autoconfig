@@ -391,12 +391,28 @@ ensure_local_user() {
 configure_role_users() {
   case "${ROLE:-}" in
     HQ-SRV|BR-SRV)
-      ensure_local_user "${SSH_REMOTE_USER:-remote_user}" "" "" "no"
+      [ "${SSH_REMOTE_USER:-}" = "remote_user" ] && SSH_REMOTE_USER="user"
+      SSH_REMOTE_USER="${SSH_REMOTE_USER:-user}"
+      SSH_REMOTE_PASSWORD="${SSH_REMOTE_PASSWORD:-P@ssw0rd}"
+      SSH_USER="${SSH_USER:-sshuser}"
+      SSH_PASSWORD="${SSH_PASSWORD:-P@ssw0rd}"
+      ;;
+    HQ-RTR|BR-RTR)
+      SSH_ROUTER_EXTRA_USER="${SSH_ROUTER_EXTRA_USER:-user}"
+      SSH_ROUTER_EXTRA_PASSWORD="${SSH_ROUTER_EXTRA_PASSWORD:-P@ssw0rd}"
+      SSH_ROUTER_USER="${SSH_ROUTER_USER:-net_admin}"
+      SSH_ROUTER_PASSWORD="${SSH_ROUTER_PASSWORD:-P@ssw0rd}"
+      ;;
+  esac
+
+  case "${ROLE:-}" in
+    HQ-SRV|BR-SRV)
+      ensure_local_user "${SSH_REMOTE_USER:-user}" "${SSH_REMOTE_PASSWORD:-P@ssw0rd}" "" "no"
       ensure_local_user "${SSH_USER:-sshuser}" "${SSH_PASSWORD:-P@ssw0rd}" "${SSH_USER_UID:-2026}" "yes"
       ;;
     HQ-RTR|BR-RTR)
+      ensure_local_user "${SSH_ROUTER_EXTRA_USER:-user}" "${SSH_ROUTER_EXTRA_PASSWORD:-P@ssw0rd}" "" "no"
       ensure_local_user "${SSH_ROUTER_USER:-net_admin}" "${SSH_ROUTER_PASSWORD:-${SSH_PASSWORD:-P@ssw0rd}}" "" "yes"
-      ensure_local_user "${SSH_USER:-sshuser}" "${SSH_PASSWORD:-P@ssw0rd}" "${SSH_USER_UID:-2026}" "yes"
       ;;
     *)
       log_skip "No managed local users required for role: ${ROLE:-unknown}"
@@ -474,8 +490,8 @@ configure_ssh_service() {
     local conf="/etc/ssh/sshd_config"
     local allow_users="${SSH_ALLOW_USERS:-}"
     case "${ROLE:-}" in
-      HQ-SRV|BR-SRV) [ -n "$allow_users" ] || allow_users="${SSH_USER:-sshuser}" ;;
-      HQ-RTR|BR-RTR) [ -n "$allow_users" ] || allow_users="${SSH_ROUTER_USER:-net_admin} ${SSH_USER:-sshuser}" ;;
+      HQ-SRV|BR-SRV) allow_users="${SSH_REMOTE_USER:-user} ${SSH_USER:-sshuser}" ;;
+      HQ-RTR|BR-RTR) allow_users="${SSH_ROUTER_EXTRA_USER:-user} ${SSH_ROUTER_USER:-net_admin}" ;;
     esac
     [ -f "$conf" ] || touch "$conf"
     backup_file "$conf"
@@ -575,11 +591,11 @@ post_checks() {
   case "${ROLE:-}" in
     HQ-SRV|BR-SRV)
       id "${SSH_USER:-sshuser}" >/dev/null 2>&1 && log_ok "SSH server user exists: ${SSH_USER:-sshuser}" || log_warn "SSH server user missing: ${SSH_USER:-sshuser}"
-      id "${SSH_REMOTE_USER:-remote_user}" >/dev/null 2>&1 && log_ok "Additional server user exists: ${SSH_REMOTE_USER:-remote_user}" || log_warn "Additional server user missing: ${SSH_REMOTE_USER:-remote_user}"
+      id "${SSH_REMOTE_USER:-user}" >/dev/null 2>&1 && log_ok "Server regular user exists: ${SSH_REMOTE_USER:-user}" || log_warn "Server regular user missing: ${SSH_REMOTE_USER:-user}"
       ;;
     HQ-RTR|BR-RTR)
       id "${SSH_ROUTER_USER:-net_admin}" >/dev/null 2>&1 && log_ok "Router SSH user exists: ${SSH_ROUTER_USER:-net_admin}" || log_warn "Router SSH user missing: ${SSH_ROUTER_USER:-net_admin}"
-      id "${SSH_USER:-sshuser}" >/dev/null 2>&1 && log_ok "Router additional SSH user exists: ${SSH_USER:-sshuser}" || log_warn "Router additional SSH user missing: ${SSH_USER:-sshuser}"
+      id "${SSH_ROUTER_EXTRA_USER:-user}" >/dev/null 2>&1 && log_ok "Router regular user exists: ${SSH_ROUTER_EXTRA_USER:-user}" || log_warn "Router regular user missing: ${SSH_ROUTER_EXTRA_USER:-user}"
       ;;
   esac
   if [ "${SSH_HARDENING:-no}" = "yes" ] && command_exists ss; then
