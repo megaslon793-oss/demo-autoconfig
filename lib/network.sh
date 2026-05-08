@@ -212,7 +212,7 @@ render_gre_interfaces_stanza() {
   for route in ${GRE_ROUTES:-}; do
     route_parts "$route"
     [ -z "$ROUTE_DEST" ] || [ -z "$ROUTE_VIA" ] || [ "$ROUTE_DEST" = "$ROUTE_VIA" ] && continue
-    printf '    post-up ip route add %s via %s\n' "$ROUTE_DEST" "$ROUTE_VIA"
+    printf '    post-up ip route replace %s via %s dev %s\n' "$ROUTE_DEST" "$ROUTE_VIA" "${GRE_NAME:-gre30}"
   done
   printf '\n'
 }
@@ -254,7 +254,7 @@ configure_network_interfaces() {
   cp "$tmp" /etc/network/interfaces
   rm -f "$tmp"
   log_ok "/etc/network/interfaces rendered"
-  log_warn "Network restart is not forced. Reboot or restart networking during a maintenance window."
+  log_ok "/etc/network/interfaces is ready to apply"
 }
 
 set_ip_forward() {
@@ -284,6 +284,17 @@ ensure_iptables_rule() {
   fi
 }
 
+ensure_iptables_insert_rule() {
+  local table="$1"; shift
+  local chain="$1"; shift
+  if /usr/sbin/iptables -t "$table" -C "$chain" "$@" 2>/dev/null; then
+    log_skip "iptables rule exists: -t $table $chain $*"
+  else
+    /usr/sbin/iptables -t "$table" -I "$chain" 1 "$@"
+    log_ok "iptables rule inserted: -t $table $chain $*"
+  fi
+}
+
 save_iptables_rules() {
   mkdir -p /etc/demo-autoconfig
   /usr/sbin/iptables-save > /etc/demo-autoconfig/iptables.rules
@@ -305,7 +316,11 @@ configure_nat() {
     return 0
   fi
   local cidr
+  local exclude
   for cidr in $NAT_LAN_CIDRS; do
+    for exclude in ${NAT_EXCLUDE_CIDRS:-}; do
+      ensure_iptables_insert_rule nat POSTROUTING -s "$cidr" -d "$exclude" -j RETURN
+    done
     ensure_iptables_rule nat POSTROUTING -s "$cidr" -o "$NAT_OUT_IFACE" -j MASQUERADE
   done
   save_iptables_rules
@@ -322,8 +337,11 @@ configure_static_routes() {
     if ip route show "$ROUTE_DEST" | grep -q "via $ROUTE_VIA"; then
       log_skip "Route exists: $ROUTE_DEST via $ROUTE_VIA"
     else
-      ip route replace "${args[@]}"
-      log_ok "Route configured: $ROUTE_DEST via $ROUTE_VIA"
+      if ip route replace "${args[@]}"; then
+        log_ok "Route configured: $ROUTE_DEST via $ROUTE_VIA"
+      else
+        log_warn "Route not ready yet: $ROUTE_DEST via $ROUTE_VIA"
+      fi
     fi
   done
 }
@@ -337,17 +355,24 @@ configure_gre() {
   if ip link show "$GRE_NAME" >/dev/null 2>&1; then
     log_skip "GRE interface already exists: $GRE_NAME"
   else
-    ip tunnel add "$GRE_NAME" mode gre local "$GRE_LOCAL_IP" remote "$GRE_REMOTE_IP" ttl "${GRE_TTL:-255}"
-    log_ok "GRE tunnel created: $GRE_NAME"
+    if ip tunnel add "$GRE_NAME" mode gre local "$GRE_LOCAL_IP" remote "$GRE_REMOTE_IP" ttl "${GRE_TTL:-255}"; then
+      log_ok "GRE tunnel created: $GRE_NAME"
+    else
+      log_warn "GRE tunnel not ready yet: $GRE_NAME"
+      return 0
+    fi
   fi
-  ip addr show "$GRE_NAME" | grep -q "$GRE_TUNNEL_LOCAL_CIDR" || ip addr add "$GRE_TUNNEL_LOCAL_CIDR" dev "$GRE_NAME"
-  ip link set "$GRE_NAME" up
+  ip addr show "$GRE_NAME" | grep -q "$GRE_TUNNEL_LOCAL_CIDR" || ip addr add "$GRE_TUNNEL_LOCAL_CIDR" dev "$GRE_NAME" || log_warn "Could not assign GRE address: $GRE_TUNNEL_LOCAL_CIDR"
+  ip link set "$GRE_NAME" up || log_warn "Could not bring GRE up: $GRE_NAME"
   local route
   for route in ${GRE_ROUTES:-}; do
     route_parts "$route"
     [ -z "$ROUTE_DEST" ] || [ -z "$ROUTE_VIA" ] || [ "$ROUTE_DEST" = "$ROUTE_VIA" ] && continue
-    ip route replace "$ROUTE_DEST" via "$ROUTE_VIA"
-    log_ok "GRE route configured: $ROUTE_DEST via $ROUTE_VIA"
+    if ip route replace "$ROUTE_DEST" via "$ROUTE_VIA" dev "$GRE_NAME"; then
+      log_ok "GRE route configured: $ROUTE_DEST via $ROUTE_VIA"
+    else
+      log_warn "GRE route not ready yet: $ROUTE_DEST via $ROUTE_VIA"
+    fi
   done
   log_ok "GRE tunnel is up: $GRE_NAME"
 }

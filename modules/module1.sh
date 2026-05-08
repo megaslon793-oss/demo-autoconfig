@@ -116,6 +116,20 @@ apply_networking_changes() {
   esac
 }
 
+reconcile_routing_after_network_restart() {
+  configure_static_routes || true
+  configure_gre || true
+  if [ "${OSPF_ENABLE:-no}" = "yes" ]; then
+    if command_exists systemctl && systemctl list-unit-files frr.service >/dev/null 2>&1; then
+      if systemctl restart frr; then
+        log_ok "FRR restarted after networking"
+      else
+        log_warn "FRR restart after networking failed"
+      fi
+    fi
+  fi
+}
+
 post_checks() {
   log_ok "Module 1 checks"
   ip -br addr || true
@@ -150,6 +164,7 @@ main() {
   configure_bind_base
   configure_ssh_hardening
   apply_networking_changes
+  reconcile_routing_after_network_restart
   post_checks
 }
 
