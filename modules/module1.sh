@@ -10,44 +10,265 @@ require_root
 ensure_dirs
 load_config
 
+join_dns_servers_for_dhcp() {
+  local raw="${DHCP_OPTION_DNS:-${DNS_SERVERS:-}}"
+  local result="" item
+  for item in $(printf '%s\n' "$raw" | tr ',' ' '); do
+    [ -z "$item" ] && continue
+    [ -n "$result" ] && result="$result, "
+    result="$result$item"
+  done
+  printf '%s' "$result"
+}
+
+require_dhcp_value() {
+  local name="$1"
+  local value="${!name:-}"
+  if [ -z "$value" ]; then
+    log_error "DHCP variable is required: $name"
+    return 1
+  fi
+}
+
 configure_dhcp() {
   [ "${DHCP_ENABLE:-no}" = "yes" ] || { log_skip "DHCP disabled by config"; return 0; }
   install_packages isc-dhcp-server
   backup_file /etc/default/isc-dhcp-server
-  printf 'INTERFACESv4="%s"\nINTERFACESv6=""\n' "${DHCP_IFACE:-}" > /etc/default/isc-dhcp-server
 
-  if [ -z "${DHCP_SUBNET:-}" ] || [ -z "${DHCP_RANGE_START:-}" ] || [ -z "${DHCP_RANGE_END:-}" ]; then
-    log_warn "DHCP variables are incomplete. Package installed, config not rewritten."
-    return 0
+  require_dhcp_value DHCP_IFACE
+  require_dhcp_value DHCP_SUBNET
+  require_dhcp_value DHCP_RANGE_START
+  require_dhcp_value DHCP_RANGE_END
+  require_dhcp_value DHCP_OPTION_ROUTERS
+  require_dhcp_value DHCP_BROADCAST_ADDRESS
+
+  local dhcp_dns
+  dhcp_dns="$(join_dns_servers_for_dhcp)"
+  if [ -z "$dhcp_dns" ]; then
+    log_error "DHCP DNS is required: set DHCP_OPTION_DNS or DNS_SERVERS"
+    return 1
   fi
 
-  backup_file /etc/dhcp/dhcpd.conf
-  cat > /etc/dhcp/dhcpd.conf <<EOF
-default-lease-time 600;
-max-lease-time 7200;
-authoritative;
-ddns-update-style none;
-option domain-name "${DHCP_DOMAIN:-$DOMAIN}";
-option domain-name-servers ${DHCP_OPTION_DNS:-$DNS_SERVERS};
+  printf 'INTERFACESv4="%s"\nINTERFACESv6=""\n' "$DHCP_IFACE" > /etc/default/isc-dhcp-server
 
-# TODO: DHCP_SUBNET is intentionally editable. Use Debian dhcpd syntax below.
-# Example: subnet 192.168.10.0 netmask 255.255.255.0 { ... }
-subnet ${DHCP_SUBNET} {
-  range ${DHCP_RANGE_START} ${DHCP_RANGE_END};
-  option routers ${DHCP_OPTION_ROUTERS};
-$(if [ -n "${DHCP_BROADCAST_ADDRESS:-}" ]; then printf '  option broadcast-address %s;\n' "$DHCP_BROADCAST_ADDRESS"; fi)
-}
-EOF
+  backup_file /etc/dhcp/dhcpd.conf
+  {
+    printf 'authoritative;\n'
+    printf 'ddns-update-style none;\n'
+    printf 'default-lease-time 600;\n'
+    printf 'max-lease-time 7200;\n'
+    printf 'option domain-name "%s";\n\n' "${DHCP_DOMAIN:-$DOMAIN}"
+    printf 'subnet %s {\n' "$DHCP_SUBNET"
+    printf '  range %s %s;\n' "$DHCP_RANGE_START" "$DHCP_RANGE_END"
+    printf '  option routers %s;\n' "$DHCP_OPTION_ROUTERS"
+    printf '  option domain-name-servers %s;\n' "$dhcp_dns"
+    printf '  option broadcast-address %s;\n' "$DHCP_BROADCAST_ADDRESS"
+    printf '}\n'
+  } > /etc/dhcp/dhcpd.conf
+
+  if command_exists dhcpd; then
+    if ! dhcpd -t -cf /etc/dhcp/dhcpd.conf; then
+      log_error "dhcpd config validation failed: /etc/dhcp/dhcpd.conf"
+      return 1
+    fi
+  fi
+
   enable_service isc-dhcp-server
   restart_service isc-dhcp-server
 }
 
+bind_first_zone() {
+  local zone="${BIND_PRIMARY_ZONE:-}"
+  if [ -z "$zone" ]; then
+    zone="${BIND_ZONES:-}"
+    zone="${zone%% *}"
+  fi
+  if [ -z "$zone" ]; then
+    zone="${DOMAIN:-}"
+  fi
+  printf '%s' "$zone"
+}
+
+bind_abs_name() {
+  local name="$1"
+  local zone="$2"
+  case "$name" in
+    @) printf '%s.' "$zone" ;;
+    *.) printf '%s' "$name" ;;
+    *.*) printf '%s.' "$name" ;;
+    *) printf '%s.%s.' "$name" "$zone" ;;
+  esac
+}
+
+bind_zone_file_path() {
+  local file="$1"
+  case "$file" in
+    /*) printf '%s' "$file" ;;
+    *) printf '/etc/bind/zones/%s' "$file" ;;
+  esac
+}
+
+render_bind_acl_block() {
+  local item
+  for item in $1; do
+    printf '    %s;\n' "$item"
+  done
+}
+
+render_bind_inline_acl() {
+  local result="" item
+  for item in $1; do
+    [ -n "$result" ] && result="$result "
+    result="$result$item;"
+  done
+  printf '%s' "$result"
+}
+
+render_bind_forward_zone() {
+  local zone="$1"
+  local zone_file="$2"
+  local serial="${BIND_ZONE_SERIAL:-2025101302}"
+  local ns_name="${BIND_NS_NAME:-ns1}"
+  local ns_ip="${BIND_NS_IP:-192.168.100.2}"
+  local record name ip
+
+  {
+    printf '$TTL 3600\n'
+    printf '@ IN SOA %s %s (\n' "$(bind_abs_name "$ns_name" "$zone")" "$(bind_abs_name "${BIND_ADMIN_NAME:-admin}" "$zone")"
+    printf '  %s ; Serial\n' "$serial"
+    printf '  3600\n'
+    printf '  1800\n'
+    printf '  1209600\n'
+    printf '  300 )\n\n'
+    printf '@ IN NS %s\n' "$(bind_abs_name "$ns_name" "$zone")"
+    printf '%s IN A %s\n\n' "$ns_name" "$ns_ip"
+    for record in ${BIND_FORWARD_RECORDS:-}; do
+      name="${record%%:*}"
+      ip="${record#*:}"
+      [ -z "$name" ] || [ -z "$ip" ] || [ "$name" = "$ip" ] && continue
+      [ "$name" = "$ns_name" ] && continue
+      printf '%s IN A %s\n' "$name" "$ip"
+    done
+  } > "$zone_file"
+}
+
+render_bind_reverse_zone() {
+  local zone="$1"
+  local reverse_zone="$2"
+  local zone_file="$3"
+  local serial="${BIND_ZONE_SERIAL:-2025101302}"
+  local record record_zone rest ptr target
+
+  {
+    printf '$TTL 3600\n'
+    printf '@ IN SOA %s %s (\n' "$(bind_abs_name "${BIND_NS_NAME:-ns1}" "$zone")" "$(bind_abs_name "${BIND_ADMIN_NAME:-admin}" "$zone")"
+    printf '  %s 3600 1800 1209600 300 )\n' "$serial"
+    printf '@ IN NS %s\n\n' "$(bind_abs_name "${BIND_NS_NAME:-ns1}" "$zone")"
+    for record in ${BIND_REVERSE_RECORDS:-}; do
+      record_zone="${record%%:*}"
+      rest="${record#*:}"
+      ptr="${rest%%:*}"
+      target="${rest#*:}"
+      [ "$record_zone" = "$reverse_zone" ] || continue
+      [ -z "$ptr" ] || [ -z "$target" ] || [ "$ptr" = "$target" ] && continue
+      printf '%s IN PTR %s\n' "$ptr" "$(bind_abs_name "$target" "$zone")"
+    done
+  } > "$zone_file"
+}
+
 configure_bind_base() {
   [ "${BIND_ENABLE:-no}" = "yes" ] || { log_skip "bind9 disabled by config"; return 0; }
-  install_packages bind9 bind9utils dnsutils
+  if ! install_packages bind9 bind9utils bind9-dnsutils; then
+    install_packages bind9 bind9utils dnsutils
+  fi
+
+  local zone
+  zone="$(bind_first_zone)"
+  if [ -z "$zone" ]; then
+    log_error "BIND zone is required: set BIND_ZONES or DOMAIN"
+    return 1
+  fi
+  BIND_FORWARD_RECORDS="${BIND_FORWARD_RECORDS:-hq-rtr:192.168.100.1 br-rtr:192.168.255.1 hq-srv:192.168.100.2 hq-cli:192.168.200.2 br-srv:192.168.255.2 docker:172.16.1.1 web:172.16.2.1}"
+  BIND_REVERSE_ZONES="${BIND_REVERSE_ZONES:-100.168.192.in-addr.arpa:db.192.168.100 200.168.192.in-addr.arpa:db.192.168.200 255.168.192.in-addr.arpa:db.192.168.255}"
+  BIND_REVERSE_RECORDS="${BIND_REVERSE_RECORDS:-100.168.192.in-addr.arpa:1:hq-rtr 100.168.192.in-addr.arpa:2:hq-srv 200.168.192.in-addr.arpa:2:hq-cli 255.168.192.in-addr.arpa:1:br-rtr 255.168.192.in-addr.arpa:2:br-srv}"
+
+  local zones_dir="/etc/bind/zones"
+  local forward_file="$zones_dir/db.$zone"
+  mkdir -p "$zones_dir"
+
+  backup_file /etc/bind/named.conf.options
+  {
+    printf 'options {\n'
+    printf '    directory "/var/cache/bind";\n'
+    printf '    listen-on { %s };\n' "$(render_bind_inline_acl "${BIND_LISTEN_ON:-any}")"
+    printf '    listen-on-v6 { none; };\n'
+    printf '    recursion yes;\n\n'
+    printf '    allow-query {\n'
+    render_bind_acl_block "${BIND_ALLOW_QUERY:-127.0.0.1 192.168.100.0/28 192.168.200.0/27 192.168.255.0/28}"
+    printf '    };\n\n'
+    printf '    forwarders {\n'
+    render_bind_acl_block "${BIND_FORWARDERS:-77.88.8.7 77.88.8.3}"
+    printf '    };\n'
+    printf '    forward only;\n\n'
+    printf '    dnssec-validation auto;\n'
+    printf '};\n'
+  } > /etc/bind/named.conf.options
+
+  backup_file /etc/bind/named.conf.local
+  {
+    printf 'zone "%s" {\n' "$zone"
+    printf '    type master;\n'
+    printf '    file "%s";\n' "$forward_file"
+    printf '};\n\n'
+    local reverse_item reverse_zone reverse_file
+    for reverse_item in ${BIND_REVERSE_ZONES:-}; do
+      reverse_zone="${reverse_item%%:*}"
+      reverse_file="${reverse_item#*:}"
+      [ -z "$reverse_zone" ] || [ -z "$reverse_file" ] || [ "$reverse_zone" = "$reverse_file" ] && continue
+      printf 'zone "%s" {\n' "$reverse_zone"
+      printf '    type master;\n'
+      printf '    file "%s";\n' "$(bind_zone_file_path "$reverse_file")"
+      printf '};\n\n'
+    done
+  } > /etc/bind/named.conf.local
+
+  backup_file "$forward_file"
+  render_bind_forward_zone "$zone" "$forward_file"
+
+  local reverse_item reverse_zone reverse_file reverse_path
+  for reverse_item in ${BIND_REVERSE_ZONES:-}; do
+    reverse_zone="${reverse_item%%:*}"
+    reverse_file="${reverse_item#*:}"
+    [ -z "$reverse_zone" ] || [ -z "$reverse_file" ] || [ "$reverse_zone" = "$reverse_file" ] && continue
+    reverse_path="$(bind_zone_file_path "$reverse_file")"
+    backup_file "$reverse_path"
+    render_bind_reverse_zone "$zone" "$reverse_zone" "$reverse_path"
+  done
+
+  if command_exists named-checkconf; then
+    if ! named-checkconf /etc/bind/named.conf; then
+      log_error "named-checkconf failed: /etc/bind/named.conf"
+      return 1
+    fi
+  fi
+  if command_exists named-checkzone; then
+    if ! named-checkzone "$zone" "$forward_file"; then
+      log_error "named-checkzone failed: $forward_file"
+      return 1
+    fi
+    for reverse_item in ${BIND_REVERSE_ZONES:-}; do
+      reverse_zone="${reverse_item%%:*}"
+      reverse_file="${reverse_item#*:}"
+      [ -z "$reverse_zone" ] || [ -z "$reverse_file" ] || [ "$reverse_zone" = "$reverse_file" ] && continue
+      if ! named-checkzone "$reverse_zone" "$(bind_zone_file_path "$reverse_file")"; then
+        log_error "named-checkzone failed: $(bind_zone_file_path "$reverse_file")"
+        return 1
+      fi
+    done
+  fi
+
   enable_service bind9
   restart_service bind9
-  log_warn "Zone creation is intentionally not hard-coded. Edit /etc/bind or extend module1 with BIND_ZONES."
 }
 
 configure_ssh_hardening() {
