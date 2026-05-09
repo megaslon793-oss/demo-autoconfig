@@ -248,7 +248,7 @@ infer_module2_defaults() {
   HQ_RTR_WAN_IP="${HQ_RTR_WAN_IP:-$(lookup_host_ip "hq-rtr.$DOMAIN_LOWER" "hq-rtr")}"
   BR_RTR_WAN_IP="${BR_RTR_WAN_IP:-$(lookup_host_ip "br-rtr.$DOMAIN_LOWER" "br-rtr")}"
   HQ_CLI_IP="${HQ_CLI_IP:-$(lookup_host_ip "hq-cli.$DOMAIN_LOWER" "hq-cli")}"
-  NTP_SERVER_IP="${NTP_SERVER_IP:-$(lookup_host_ip "docker.$DOMAIN_LOWER" "docker")}"
+  NTP_SERVER_IP="${NTP_SERVER_IP:-${ISP_HQ_IP:-172.16.1.1}}"
 
   if [ -z "${HQ_CLI_NET:-}" ] && [ -n "${DHCP_SUBNET:-}" ]; then
     HQ_CLI_NET="$(subnet_decl_to_cidr "$DHCP_SUBNET")"
@@ -263,6 +263,14 @@ infer_module2_defaults() {
   HQ_CLI_IP="${HQ_CLI_IP:-192.168.200.2}"
   HQ_CLI_NET="${HQ_CLI_NET:-192.168.200.0/27}"
   NTP_SERVER_IP="${NTP_SERVER_IP:-172.16.1.1}"
+}
+
+normalize_module2_defaults() {
+  if [ -n "${BIND_FORWARD_RECORDS:-}" ] && printf '%s' "$BIND_FORWARD_RECORDS" | grep -q 'web:172\.16\.2\.1'; then
+    BIND_FORWARD_RECORDS="$(printf '%s' "$BIND_FORWARD_RECORDS" | sed 's/web:172\.16\.2\.1/web:172.16.1.1/g')"
+    upsert_kv_config "$CONFIG_FILE" BIND_FORWARD_RECORDS "$BIND_FORWARD_RECORDS"
+    log_warn "Normalized legacy workbook default for web.$DOMAIN_LOWER to 172.16.1.1"
+  fi
 }
 
 wait_for_check() {
@@ -400,42 +408,135 @@ resolve_hq_cli_connection() {
   try_connection_candidate "HQ-CLI" "$HQ_CLI_IP" "$SSH_SERVER_USER" "$SSH_SERVER_PASSWORD" "$SSH_SERVER_PORT" && return 0
   try_connection_candidate "HQ-CLI" "$HQ_CLI_IP" "$SSH_REMOTE_USER" "${HQ_CLI_ANSIBLE_PASSWORD:-$ADMIN_PASSWORD}" 22 && return 0
 
-  log_error "Could not find root-capable SSH access for HQ-CLI"
+  return 1
+}
+
+resolve_router_connection() {
+  local target_role="$1"
+  local host="$2"
+  local pw
+
+  try_connection_candidate "$target_role" "$host" "$SSH_ROUTER_USER" "$SSH_ROUTER_PASSWORD" "$SSH_ROUTER_PORT" && return 0
+  try_connection_candidate "$target_role" "$host" "${SSH_ROUTER_EXTRA_USER:-user}" "${SSH_ROUTER_PASSWORD:-$ADMIN_PASSWORD}" "$SSH_ROUTER_PORT" && return 0
+
+  for pw in \
+    "${SSH_ROUTER_PASSWORD:-}" \
+    "${ADMIN_PASSWORD:-}" \
+    root
+  do
+    try_connection_candidate "$target_role" "$host" root "$pw" 22 && return 0
+    try_connection_candidate "$target_role" "$host" root "$pw" "$SSH_ROUTER_PORT" && return 0
+  done
+
+  return 1
+}
+
+resolve_server_connection() {
+  local target_role="$1"
+  local host="$2"
+  local pw
+
+  try_connection_candidate "$target_role" "$host" "$SSH_SERVER_USER" "$SSH_SERVER_PASSWORD" "$SSH_SERVER_PORT" && return 0
+  try_connection_candidate "$target_role" "$host" "${SSH_REMOTE_USER:-user}" "${SSH_SERVER_PASSWORD:-$ADMIN_PASSWORD}" "$SSH_SERVER_PORT" && return 0
+
+  for pw in \
+    "${SSH_SERVER_PASSWORD:-}" \
+    "${ADMIN_PASSWORD:-}" \
+    root
+  do
+    try_connection_candidate "$target_role" "$host" root "$pw" 22 && return 0
+    try_connection_candidate "$target_role" "$host" root "$pw" "$SSH_SERVER_PORT" && return 0
+  done
+
   return 1
 }
 
 wait_for_remote_ssh() {
   local target_role="$1"
+  local max_attempts="${2:-}"
+  local delay="${3:-3}"
+  local quiet="${4:-no}"
   local attempt
 
+  if [ -z "$max_attempts" ]; then
+    case "$target_role" in
+      HQ-SRV|BR-SRV) max_attempts=4 ;;
+      HQ-RTR|BR-RTR|HQ-CLI) max_attempts=2 ;;
+      *) max_attempts=4 ;;
+    esac
+  fi
+
   if [ "$target_role" = "HQ-CLI" ]; then
-    for attempt in $(seq 1 6); do
+    for attempt in $(seq 1 "$max_attempts"); do
       if resolve_hq_cli_connection; then
         return 0
       fi
-      sleep 5
+      sleep "$delay"
     done
+    [ "$quiet" = "yes" ] || log_error "Could not find root-capable SSH access for HQ-CLI"
+    return 1
+  fi
+
+  if [ "$target_role" = "HQ-RTR" ]; then
+    for attempt in $(seq 1 "$max_attempts"); do
+      if resolve_router_connection "$target_role" "$HQ_RTR_WAN_IP"; then
+        return 0
+      fi
+      sleep "$delay"
+    done
+    [ "$quiet" = "yes" ] || log_error "Could not reach $target_role with root-capable SSH"
+    return 1
+  fi
+
+  if [ "$target_role" = "BR-RTR" ]; then
+    for attempt in $(seq 1 "$max_attempts"); do
+      if resolve_router_connection "$target_role" "$BR_RTR_WAN_IP"; then
+        return 0
+      fi
+      sleep "$delay"
+    done
+    [ "$quiet" = "yes" ] || log_error "Could not reach $target_role with root-capable SSH"
+    return 1
+  fi
+
+  if [ "$target_role" = "HQ-SRV" ]; then
+    for attempt in $(seq 1 "$max_attempts"); do
+      if resolve_server_connection "$target_role" "$HQ_SRV_IP"; then
+        return 0
+      fi
+      sleep "$delay"
+    done
+    [ "$quiet" = "yes" ] || log_error "Could not reach $target_role with root-capable SSH"
+    return 1
+  fi
+
+  if [ "$target_role" = "BR-SRV" ]; then
+    for attempt in $(seq 1 "$max_attempts"); do
+      if resolve_server_connection "$target_role" "$BR_SRV_IP"; then
+        return 0
+      fi
+      sleep "$delay"
+    done
+    [ "$quiet" = "yes" ] || log_error "Could not reach $target_role with root-capable SSH"
     return 1
   fi
 
   resolve_remote_connection "$target_role" || return 1
-  for attempt in $(seq 1 12); do
+  for attempt in $(seq 1 "$max_attempts"); do
     if remote_root_ready "$REMOTE_PASSWORD" "$REMOTE_PORT" "$REMOTE_USER" "$REMOTE_HOST"; then
       log_ok "Remote root-capable SSH is reachable for $target_role at $REMOTE_HOST:$REMOTE_PORT"
       return 0
     fi
-    sleep 5
+    sleep "$delay"
   done
 
-  log_error "Could not reach $target_role with root-capable SSH at $REMOTE_HOST:$REMOTE_PORT"
+  [ "$quiet" = "yes" ] || log_error "Could not reach $target_role with root-capable SSH at $REMOTE_HOST:$REMOTE_PORT"
   return 1
 }
 
-run_remote_module2_role() {
+stream_remote_module2_role() {
   local target_role="$1"
   local remote_dir remote_cmd remote_pw_q remote_dir_q
-
-  wait_for_remote_ssh "$target_role" || return 1
   remote_dir="$MODULE2_REMOTE_TMP_ROOT/${target_role,,}"
   printf -v remote_pw_q '%q' "$REMOTE_PASSWORD"
   printf -v remote_dir_q '%q' "$remote_dir"
@@ -455,16 +556,45 @@ run_remote_module2_role() {
   log_ok "Remote Module 2 finished: $target_role"
 }
 
+run_remote_module2_role() {
+  local target_role="$1"
+  wait_for_remote_ssh "$target_role" || return 1
+  stream_remote_module2_role "$target_role"
+}
+
+run_remote_module2_role_optional() {
+  local target_role="$1"
+  if ! wait_for_remote_ssh "$target_role" 2 2 yes; then
+    if [ "$target_role" = "HQ-CLI" ]; then
+      log_warn "Skipping remote Module 2 for HQ-CLI: no root-capable SSH. Run Module 2 locally on HQ-CLI after infrastructure roles finish."
+    else
+      log_warn "Skipping remote Module 2 for $target_role: no root-capable SSH from ISP"
+    fi
+    return 0
+  fi
+  stream_remote_module2_role "$target_role"
+}
+
 verify_module2_from_hq_cli() {
   local verify_cmd
-  wait_for_remote_ssh "HQ-CLI" || return 1
   verify_cmd="curl -fsS -u 'WEB:$ADMIN_PASSWORD' http://web.$DOMAIN_LOWER/ >/dev/null && curl -fsS http://docker.$DOMAIN_LOWER/ >/dev/null"
-  if wait_for_check 12 5 "remote_ssh_exec '$REMOTE_PASSWORD' '$REMOTE_PORT' '$REMOTE_USER' '$REMOTE_HOST' \"$verify_cmd\""; then
-    log_ok "HQ-CLI verified http://web.$DOMAIN_LOWER/ and http://docker.$DOMAIN_LOWER/"
-  else
+  if wait_for_remote_ssh "HQ-CLI" 2 2 yes; then
+    if wait_for_check 12 5 "remote_ssh_exec '$REMOTE_PASSWORD' '$REMOTE_PORT' '$REMOTE_USER' '$REMOTE_HOST' \"$verify_cmd\""; then
+      log_ok "HQ-CLI verified http://web.$DOMAIN_LOWER/ and http://docker.$DOMAIN_LOWER/"
+      return 0
+    fi
     log_error "HQ-CLI could not verify both Module 2 web endpoints"
     return 1
   fi
+
+  log_warn "HQ-CLI root-capable SSH is unavailable. Verifying Module 2 web endpoints from ISP reverse proxy only."
+  if wait_for_check 12 5 "curl -fsS -u 'WEB:$ADMIN_PASSWORD' -H 'Host: web.$DOMAIN_LOWER' http://127.0.0.1/ >/dev/null && curl -fsS -H 'Host: docker.$DOMAIN_LOWER' http://127.0.0.1/ >/dev/null"; then
+    log_ok "ISP verified reverse proxy for http://web.$DOMAIN_LOWER/ and http://docker.$DOMAIN_LOWER/"
+    return 0
+  fi
+
+  log_error "Module 2 web endpoints did not answer via ISP reverse proxy"
+  return 1
 }
 
 run_with_failure_capture() {
@@ -490,9 +620,9 @@ orchestrate_module2_from_isp() {
   run_with_failure_capture "Module 2 role failed: ISP" run_module2_role_actions "ISP" || failures=$((failures + 1))
   run_with_failure_capture "Module 2 role failed: HQ-SRV" run_remote_module2_role "HQ-SRV" || failures=$((failures + 1))
   run_with_failure_capture "Module 2 role failed: BR-SRV" run_remote_module2_role "BR-SRV" || failures=$((failures + 1))
-  run_with_failure_capture "Module 2 role failed: HQ-RTR" run_remote_module2_role "HQ-RTR" || failures=$((failures + 1))
-  run_with_failure_capture "Module 2 role failed: BR-RTR" run_remote_module2_role "BR-RTR" || failures=$((failures + 1))
-  run_with_failure_capture "Module 2 role failed: HQ-CLI" run_remote_module2_role "HQ-CLI" || failures=$((failures + 1))
+  run_with_failure_capture "Module 2 role failed: HQ-RTR" run_remote_module2_role_optional "HQ-RTR" || failures=$((failures + 1))
+  run_with_failure_capture "Module 2 role failed: BR-RTR" run_remote_module2_role_optional "BR-RTR" || failures=$((failures + 1))
+  run_with_failure_capture "Module 2 role failed: HQ-CLI" run_remote_module2_role_optional "HQ-CLI" || failures=$((failures + 1))
   run_with_failure_capture "Module 2 endpoint verification failed" verify_module2_from_hq_cli || failures=$((failures + 1))
 
   if [ "$failures" -gt 0 ]; then
@@ -504,7 +634,7 @@ orchestrate_module2_from_isp() {
 }
 
 prepare_iso_mount() {
-  local candidate
+  local candidate device
   for candidate in "$ISO_DIR" /media/cdrom0 /mnt/additional /tmp/additional; do
     [ -d "$candidate" ] || continue
     if [ -d "$candidate/docker" ] || [ -d "$candidate/web" ] || [ -f "$candidate/Users.csv" ] || [ -f "$candidate/$USERS_CSV_PATH" ]; then
@@ -528,6 +658,16 @@ prepare_iso_mount() {
       return 0
     fi
   fi
+  for device in /dev/sr0 /dev/cdrom; do
+    [ -b "$device" ] || continue
+    mkdir -p /mnt/additional
+    mountpoint -q /mnt/additional || mount -t iso9660 "$device" /mnt/additional || true
+    if [ -d /mnt/additional/docker ] || [ -d /mnt/additional/web ] || [ -f /mnt/additional/Users.csv ] || [ -f /mnt/additional/$USERS_CSV_PATH ]; then
+      ISO_DIR="/mnt/additional"
+      log_ok "Additional ISO mounted from $device to $ISO_DIR"
+      return 0
+    fi
+  done
   log_warn "Additional files were not found. Set ISO_PATH or mount the ISO to $ISO_DIR."
   return 1
 }
@@ -562,6 +702,7 @@ prepare_additional_workspace() {
 }
 
 infer_module2_defaults
+normalize_module2_defaults
 
 write_krb5_conf() {
   backup_file /etc/krb5.conf
@@ -712,7 +853,7 @@ render_forward_zone_m2() {
   local apex_ip="${BIND_APEX_IP:-$ns_ip}"
   local record name ip
 
-  BIND_FORWARD_RECORDS="${BIND_FORWARD_RECORDS:-hq-rtr:192.168.100.1 br-rtr:192.168.255.1 hq-srv:192.168.100.2 hq-cli:192.168.200.2 br-srv:192.168.255.2 docker:172.16.1.1 web:172.16.2.1}"
+  BIND_FORWARD_RECORDS="${BIND_FORWARD_RECORDS:-hq-rtr:192.168.100.1 br-rtr:192.168.255.1 hq-srv:192.168.100.2 hq-cli:192.168.200.2 br-srv:192.168.255.2 docker:172.16.1.1 web:172.16.1.1}"
 
   {
     printf '$TTL 3600\n'
@@ -739,9 +880,6 @@ setup_bind_ad_records() {
   local zone_file="/etc/bind/zones/db.$DOMAIN_LOWER"
   install_packages bind9 bind9utils bind9-dnsutils || install_packages bind9 bind9utils dnsutils
   mkdir -p /etc/bind/zones
-  if [ ! -s "$zone_file" ]; then
-    render_forward_zone_m2 "$DOMAIN_LOWER" "$zone_file"
-  fi
   if [ -f /etc/bind/named.conf.local ] && ! grep -q "zone \"$DOMAIN_LOWER\"" /etc/bind/named.conf.local 2>/dev/null; then
     backup_file /etc/bind/named.conf.local
     cat >> /etc/bind/named.conf.local <<EOF
@@ -753,6 +891,8 @@ zone "$DOMAIN_LOWER" {
 EOF
   fi
   backup_file "$zone_file"
+  render_forward_zone_m2 "$DOMAIN_LOWER" "$zone_file"
+  ensure_line "$zone_file" "mon IN CNAME hq-srv.$DOMAIN_LOWER."
   ensure_line "$zone_file" "_ldap._tcp IN SRV 0 100 389 br-srv.$DOMAIN_LOWER."
   ensure_line "$zone_file" "_kerberos._tcp IN SRV 0 100 88 br-srv.$DOMAIN_LOWER."
   ensure_line "$zone_file" "_kerberos._udp IN SRV 0 100 88 br-srv.$DOMAIN_LOWER."
@@ -761,6 +901,8 @@ EOF
   ensure_line "$zone_file" "_gc._tcp IN SRV 0 100 3268 br-srv.$DOMAIN_LOWER."
   ensure_line "$zone_file" "_ldap._tcp.dc._msdcs IN SRV 0 100 389 br-srv.$DOMAIN_LOWER."
   ensure_line "$zone_file" "_kerberos IN TXT \"$REALM_UPPER\""
+  chown root:bind "$zone_file" 2>/dev/null || true
+  chmod 640 "$zone_file" 2>/dev/null || true
   if command_exists named-checkconf; then
     named-checkconf /etc/bind/named.conf || true
   fi
