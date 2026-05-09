@@ -370,11 +370,13 @@ wait_for_remote_ssh() {
 
 run_remote_module2_role() {
   local target_role="$1"
-  local remote_dir remote_cmd
+  local remote_dir remote_cmd remote_pw_q remote_dir_q
 
   wait_for_remote_ssh "$target_role" || return 1
   remote_dir="$MODULE2_REMOTE_TMP_ROOT/${target_role,,}"
-  remote_cmd="remote_dir='$remote_dir'; rm -rf \"\$remote_dir\"; mkdir -p \"\$remote_dir\"; tar -xzf - -C \"\$remote_dir\" || { rc=\$?; rm -rf \"\$remote_dir\"; exit \$rc; }; rc=0; DEMO_SKIP_MODULE2_ORCHESTRATION=yes bash \"\$remote_dir/modules/module2.sh\" || rc=\$?; rm -rf \"\$remote_dir\"; exit \$rc"
+  printf -v remote_pw_q '%q' "$REMOTE_PASSWORD"
+  printf -v remote_dir_q '%q' "$remote_dir"
+  remote_cmd="remote_dir=$remote_dir_q; sudo_pw=$remote_pw_q; rm -rf \"\$remote_dir\"; mkdir -p \"\$remote_dir\"; tar -xzf - -C \"\$remote_dir\" || { rc=\$?; rm -rf \"\$remote_dir\"; exit \$rc; }; rc=0; if [ \"\$(id -u)\" -eq 0 ]; then DEMO_SKIP_MODULE2_ORCHESTRATION=yes bash \"\$remote_dir/modules/module2.sh\" || rc=\$?; elif sudo -n true >/dev/null 2>&1; then sudo -n env DEMO_SKIP_MODULE2_ORCHESTRATION=yes bash \"\$remote_dir/modules/module2.sh\" || rc=\$?; else printf '%s\n' \"\$sudo_pw\" | sudo -S -p '' env DEMO_SKIP_MODULE2_ORCHESTRATION=yes bash \"\$remote_dir/modules/module2.sh\" || rc=\$?; fi; if [ \"\$(id -u)\" -eq 0 ]; then rm -rf \"\$remote_dir\"; elif sudo -n true >/dev/null 2>&1; then sudo -n rm -rf \"\$remote_dir\"; else printf '%s\n' \"\$sudo_pw\" | sudo -S -p '' rm -rf \"\$remote_dir\"; fi; exit \$rc"
 
   log_ok "Starting remote Module 2: $target_role"
   tar -C "$PROJECT_DIR" -czf - VERSION lib modules | \

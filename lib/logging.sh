@@ -11,7 +11,7 @@ log_line() {
   local level="$1"; shift
   local msg="$*"
   printf '[%s] %s\n' "$level" "$msg"
-  printf '%s [%s] %s\n' "$(date '+%F %T')" "$level" "$msg" >> "$LOG_FILE"
+  printf '%s [%s] %s\n' "$(date '+%F %T')" "$level" "$msg" >> "$LOG_FILE" 2>/dev/null || true
 }
 
 log_ok() { log_line OK "$@"; }
