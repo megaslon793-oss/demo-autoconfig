@@ -332,12 +332,19 @@ iptables_save_cmd() {
 }
 
 ensure_iptables_available() {
+  if command_exists debconf-set-selections; then
+    printf 'iptables-persistent iptables-persistent/autosave_v4 boolean true\n' | debconf-set-selections 2>/dev/null || true
+    printf 'iptables-persistent iptables-persistent/autosave_v6 boolean true\n' | debconf-set-selections 2>/dev/null || true
+  fi
   if ! IPTABLES_BIN="$(iptables_cmd)"; then
     install_packages iptables || { log_error "Could not install package: iptables"; return 1; }
     IPTABLES_BIN="$(iptables_cmd)" || { log_error "iptables not found after package install"; return 1; }
   fi
   IPTABLES_SAVE_BIN="$(iptables_save_cmd)" || log_warn "iptables-save not found; NAT rules will not be persisted"
   install_packages iptables-persistent netfilter-persistent || log_warn "Persistent iptables packages were not installed; NAT rules still applied for current boot"
+  if command_exists systemctl && systemctl list-unit-files netfilter-persistent.service >/dev/null 2>&1; then
+    enable_service netfilter-persistent || true
+  fi
 }
 
 ensure_iptables_rule() {
@@ -376,7 +383,15 @@ save_iptables_rules() {
   "$iptables_save" > /etc/demo-autoconfig/iptables.rules
   "$iptables_save" > /etc/iptables/rules.v4
   if command_exists netfilter-persistent; then
+    if command_exists systemctl && systemctl list-unit-files netfilter-persistent.service >/dev/null 2>&1; then
+      enable_service netfilter-persistent || true
+    fi
     netfilter-persistent save || log_warn "netfilter-persistent save failed"
+    if command_exists systemctl && systemctl list-unit-files netfilter-persistent.service >/dev/null 2>&1; then
+      restart_service netfilter-persistent || log_warn "netfilter-persistent restart failed"
+    else
+      netfilter-persistent reload || true
+    fi
   else
     log_warn "netfilter-persistent not installed. Rules saved to /etc/iptables/rules.v4"
   fi
