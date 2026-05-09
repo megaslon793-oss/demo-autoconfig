@@ -30,6 +30,7 @@ HQ_CLI_NET="${HQ_CLI_NET:-}"
 SSH_SERVER_USER="${SSH_USER:-sshuser}"
 SSH_SERVER_PASSWORD="${SSH_PASSWORD:-$ADMIN_PASSWORD}"
 SSH_SERVER_PORT="${SSH_SERVER_PORT:-2026}"
+SSH_REMOTE_USER="${SSH_REMOTE_USER:-user}"
 SSH_ROUTER_USER="${SSH_ROUTER_USER:-net_admin}"
 SSH_ROUTER_PASSWORD="${SSH_ROUTER_PASSWORD:-$ADMIN_PASSWORD}"
 SSH_ROUTER_PORT="${SSH_ROUTER_PORT:-2026}"
@@ -301,6 +302,14 @@ remote_ssh_exec() {
     "$user@$host" "$@"
 }
 
+remote_root_ready() {
+  local password="$1"
+  local port="$2"
+  local user="$3"
+  local host="$4"
+  remote_ssh_exec "$password" "$port" "$user" "$host" "if [ \"\$(id -u)\" -eq 0 ]; then exit 0; elif sudo -n true >/dev/null 2>&1; then exit 0; else printf '%s\n' '$password' | sudo -S -p '' true >/dev/null 2>&1; fi" >/dev/null 2>&1
+}
+
 resolve_remote_connection() {
   local target_role="$1"
   REMOTE_HOST=""
@@ -351,20 +360,74 @@ resolve_remote_connection() {
   fi
 }
 
+try_connection_candidate() {
+  local target_role="$1"
+  local host="$2"
+  local user="$3"
+  local password="$4"
+  local port="$5"
+
+  [ -n "$host" ] || return 1
+  [ -n "$user" ] || return 1
+  [ -n "$password" ] || return 1
+  [ -n "$port" ] || return 1
+
+  if remote_root_ready "$password" "$port" "$user" "$host"; then
+    REMOTE_HOST="$host"
+    REMOTE_USER="$user"
+    REMOTE_PASSWORD="$password"
+    REMOTE_PORT="$port"
+    log_ok "Remote root-capable SSH is reachable for $target_role at $REMOTE_HOST:$REMOTE_PORT as $REMOTE_USER"
+    return 0
+  fi
+  return 1
+}
+
+resolve_hq_cli_connection() {
+  local pw
+
+  for pw in \
+    "${HQ_CLI_ANSIBLE_PASSWORD:-}" \
+    "${ADMIN_PASSWORD:-}" \
+    "${SSH_PASSWORD:-}" \
+    root
+  do
+    try_connection_candidate "HQ-CLI" "$HQ_CLI_IP" root "$pw" 22 && return 0
+    try_connection_candidate "HQ-CLI" "$HQ_CLI_IP" root "$pw" "$SSH_SERVER_PORT" && return 0
+  done
+
+  try_connection_candidate "HQ-CLI" "$HQ_CLI_IP" "$HQ_CLI_ANSIBLE_USER" "$HQ_CLI_ANSIBLE_PASSWORD" "$HQ_CLI_ANSIBLE_PORT" && return 0
+  try_connection_candidate "HQ-CLI" "$HQ_CLI_IP" "$SSH_SERVER_USER" "$SSH_SERVER_PASSWORD" "$SSH_SERVER_PORT" && return 0
+  try_connection_candidate "HQ-CLI" "$HQ_CLI_IP" "$SSH_REMOTE_USER" "${HQ_CLI_ANSIBLE_PASSWORD:-$ADMIN_PASSWORD}" 22 && return 0
+
+  log_error "Could not find root-capable SSH access for HQ-CLI"
+  return 1
+}
+
 wait_for_remote_ssh() {
   local target_role="$1"
   local attempt
-  resolve_remote_connection "$target_role" || return 1
 
+  if [ "$target_role" = "HQ-CLI" ]; then
+    for attempt in $(seq 1 6); do
+      if resolve_hq_cli_connection; then
+        return 0
+      fi
+      sleep 5
+    done
+    return 1
+  fi
+
+  resolve_remote_connection "$target_role" || return 1
   for attempt in $(seq 1 12); do
-    if remote_ssh_exec "$REMOTE_PASSWORD" "$REMOTE_PORT" "$REMOTE_USER" "$REMOTE_HOST" true >/dev/null 2>&1; then
-      log_ok "SSH is reachable for $target_role at $REMOTE_HOST:$REMOTE_PORT"
+    if remote_root_ready "$REMOTE_PASSWORD" "$REMOTE_PORT" "$REMOTE_USER" "$REMOTE_HOST"; then
+      log_ok "Remote root-capable SSH is reachable for $target_role at $REMOTE_HOST:$REMOTE_PORT"
       return 0
     fi
     sleep 5
   done
 
-  log_error "Could not reach $target_role over SSH at $REMOTE_HOST:$REMOTE_PORT"
+  log_error "Could not reach $target_role with root-capable SSH at $REMOTE_HOST:$REMOTE_PORT"
   return 1
 }
 
