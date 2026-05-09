@@ -55,7 +55,8 @@ curl -fsSL https://raw.githubusercontent.com/megaslon793-oss/demo-autoconfig/mai
 - `Initial setup`: создание или пересоздание `/etc/demo-autoconfig/config.env`, hostname, `/etc/hosts`, `/etc/resolv.conf`, опциональный mount `Additional.iso`, проверки доступности.
 - `Module 1`: hostname, `/etc/network/interfaces`, IPv4 forwarding, NAT через `/usr/sbin/iptables`, статические маршруты, GRE, FRR/OSPF, DHCP, bind9 base install, SSH hardening.
 - `Diagnostics`: сетевые команды и проверки основных сервисов.
-- `Module 2` и `Module 3`: безопасные структурированные заглушки с TODO.
+- `Module 2`: Chrony, nginx reverse proxy на `ISP`, DNAT на роутерах, Samba AD DC и импорт пользователей из `Users.csv` на `BR-SRV`, Docker-приложение из локальных tar-образов `Additional.iso`, NFS и Apache + MariaDB на `HQ-SRV`, подключение `HQ-CLI` к домену и проверка `http://web.au-team.irpo/` и `http://docker.au-team.irpo/`.
+- `Module 3`: безопасная расширяемая заготовка под эксплуатацию и безопасность.
 
 ## Важные файлы
 
