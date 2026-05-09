@@ -10,6 +10,11 @@ require_root
 ensure_dirs
 load_config
 
+# Allows ISP orchestration to run this module on remote nodes without rewriting their config.env.
+if [ -n "${DEMO_FORCE_ROLE:-}" ]; then
+  ROLE="$DEMO_FORCE_ROLE"
+fi
+
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-P@ssw0rd}"
 DOMAIN_LOWER="${DOMAIN:-au-team.irpo}"
 REALM_UPPER="${REALM_UPPER:-$(printf '%s' "$DOMAIN_LOWER" | tr '[:lower:]' '[:upper:]')}"
@@ -668,7 +673,179 @@ EOF_BORG_DB
   log_warn "Copy /home/irpoadmin/.ssh/borg_irpo.pub to HQ-CLI:/home/backupsvc/.ssh/authorized_keys before running backups."
 }
 
-case "${ROLE:-}" in
+
+# ---------- ISP orchestration for fast repeated tests ----------
+MODULE3_ORCHESTRATE_FROM_ISP="${MODULE3_ORCHESTRATE_FROM_ISP:-yes}"
+MODULE3_REMOTE_TMP_ROOT="${MODULE3_REMOTE_TMP_ROOT:-/tmp/demo-module3-remote}"
+MODULE3_REMOTE_ROLES="${MODULE3_REMOTE_ROLES:-HQ-SRV HQ-CLI BR-SRV HQ-RTR BR-RTR}"
+
+wait_for_check() {
+  local attempts="$1" delay="$2" command="$3" count
+  for count in $(seq 1 "$attempts"); do
+    if eval "$command" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep "$delay"
+  done
+  return 1
+}
+
+module3_orchestration_enabled() {
+  [ "${ROLE:-}" = "ISP" ] || return 1
+  [ "${DEMO_SKIP_MODULE3_ORCHESTRATION:-no}" != "yes" ] || return 1
+  [ "$MODULE3_ORCHESTRATE_FROM_ISP" != "no" ] || return 1
+}
+
+remote_ssh_exec() {
+  local password="$1" port="$2" user="$3" host="$4"
+  shift 4
+  SSHPASS="$password" sshpass -e ssh \
+    -p "$port" \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o IdentitiesOnly=yes \
+    -o PreferredAuthentications=password \
+    -o PubkeyAuthentication=no \
+    -o ConnectTimeout=10 \
+    "$user@$host" "$@"
+}
+
+remote_root_ready() {
+  local password="$1" port="$2" user="$3" host="$4"
+  remote_ssh_exec "$password" "$port" "$user" "$host" "if [ \"\$(id -u)\" -eq 0 ]; then exit 0; elif sudo -n true >/dev/null 2>&1; then exit 0; else printf '%s\n' '$password' | sudo -S -p '' true >/dev/null 2>&1; fi" >/dev/null 2>&1
+}
+
+try_connection_candidate() {
+  local target_role="$1" host="$2" user="$3" password="$4" port="$5"
+  [ -n "$host" ] && [ -n "$user" ] && [ -n "$password" ] && [ -n "$port" ] || return 1
+  if remote_root_ready "$password" "$port" "$user" "$host"; then
+    REMOTE_HOST="$host"; REMOTE_USER="$user"; REMOTE_PASSWORD="$password"; REMOTE_PORT="$port"
+    log_ok "Remote root-capable SSH for $target_role: $REMOTE_HOST:$REMOTE_PORT as $REMOTE_USER"
+    return 0
+  fi
+  return 1
+}
+
+resolve_server_connection() {
+  local target_role="$1" host="$2" pw
+  try_connection_candidate "$target_role" "$host" "$SSH_SERVER_USER" "$SSH_SERVER_PASSWORD" "$SSH_SERVER_PORT" && return 0
+  try_connection_candidate "$target_role" "$host" "${SSH_REMOTE_USER:-user}" "${SSH_SERVER_PASSWORD:-$ADMIN_PASSWORD}" "$SSH_SERVER_PORT" && return 0
+  for pw in "${SSH_SERVER_PASSWORD:-}" "${ADMIN_PASSWORD:-}" root; do
+    try_connection_candidate "$target_role" "$host" root "$pw" 22 && return 0
+    try_connection_candidate "$target_role" "$host" root "$pw" "$SSH_SERVER_PORT" && return 0
+  done
+  return 1
+}
+
+resolve_router_connection() {
+  local target_role="$1" host="$2" pw
+  try_connection_candidate "$target_role" "$host" "$SSH_ROUTER_USER" "$SSH_ROUTER_PASSWORD" "$SSH_ROUTER_PORT" && return 0
+  try_connection_candidate "$target_role" "$host" "${SSH_ROUTER_EXTRA_USER:-user}" "${SSH_ROUTER_PASSWORD:-$ADMIN_PASSWORD}" "$SSH_ROUTER_PORT" && return 0
+  for pw in "${SSH_ROUTER_PASSWORD:-}" "${ADMIN_PASSWORD:-}" root; do
+    try_connection_candidate "$target_role" "$host" root "$pw" 22 && return 0
+    try_connection_candidate "$target_role" "$host" root "$pw" "$SSH_ROUTER_PORT" && return 0
+  done
+  return 1
+}
+
+resolve_hq_cli_connection() {
+  local pw
+  for pw in "${HQ_CLI_ANSIBLE_PASSWORD:-}" "${ADMIN_PASSWORD:-}" "${SSH_PASSWORD:-}" root; do
+    try_connection_candidate "HQ-CLI" "$HQ_CLI_IP" root "$pw" 22 && return 0
+    try_connection_candidate "HQ-CLI" "$HQ_CLI_IP" root "$pw" "$SSH_CLIENT_PORT" && return 0
+  done
+  try_connection_candidate "HQ-CLI" "$HQ_CLI_IP" "${HQ_CLI_ANSIBLE_USER:-user}" "${HQ_CLI_ANSIBLE_PASSWORD:-root}" "${HQ_CLI_ANSIBLE_PORT:-22}" && return 0
+  try_connection_candidate "HQ-CLI" "$HQ_CLI_IP" "$SSH_SERVER_USER" "$SSH_SERVER_PASSWORD" 22 && return 0
+  return 1
+}
+
+wait_for_remote_ssh() {
+  local target_role="$1" max_attempts="${2:-3}" delay="${3:-2}" quiet="${4:-no}" attempt
+  for attempt in $(seq 1 "$max_attempts"); do
+    case "$target_role" in
+      HQ-SRV) resolve_server_connection "$target_role" "$HQ_SRV_IP" && return 0 ;;
+      BR-SRV) resolve_server_connection "$target_role" "$BR_SRV_IP" && return 0 ;;
+      HQ-RTR) resolve_router_connection "$target_role" "$HQ_RTR_WAN_IP" && return 0 ;;
+      BR-RTR) resolve_router_connection "$target_role" "$BR_RTR_WAN_IP" && return 0 ;;
+      HQ-CLI) resolve_hq_cli_connection && return 0 ;;
+      *) log_error "Unknown remote Module 3 role: $target_role"; return 1 ;;
+    esac
+    sleep "$delay"
+  done
+  [ "$quiet" = "yes" ] || log_error "Could not reach $target_role with root-capable SSH"
+  return 1
+}
+
+stream_remote_module3_role() {
+  local target_role="$1" remote_dir remote_cmd remote_pw_q remote_dir_q target_q
+  remote_dir="$MODULE3_REMOTE_TMP_ROOT/${target_role,,}"
+  printf -v remote_pw_q '%q' "$REMOTE_PASSWORD"
+  printf -v remote_dir_q '%q' "$remote_dir"
+  printf -v target_q '%q' "$target_role"
+  remote_cmd="remote_dir=$remote_dir_q; sudo_pw=$remote_pw_q; target_role=$target_q; rm -rf \"\$remote_dir\"; mkdir -p \"\$remote_dir\"; tar -xzf - -C \"\$remote_dir\" || { rc=\$?; rm -rf \"\$remote_dir\"; exit \$rc; }; rc=0; if [ \"\$(id -u)\" -eq 0 ]; then DEMO_SKIP_MODULE3_ORCHESTRATION=yes DEMO_FORCE_ROLE=\"\$target_role\" bash \"\$remote_dir/modules/module3.sh\" || rc=\$?; elif sudo -n true >/dev/null 2>&1; then sudo -n env DEMO_SKIP_MODULE3_ORCHESTRATION=yes DEMO_FORCE_ROLE=\"\$target_role\" bash \"\$remote_dir/modules/module3.sh\" || rc=\$?; else printf '%s\n' \"\$sudo_pw\" | sudo -S -p '' env DEMO_SKIP_MODULE3_ORCHESTRATION=yes DEMO_FORCE_ROLE=\"\$target_role\" bash \"\$remote_dir/modules/module3.sh\" || rc=\$?; fi; if [ \"\$(id -u)\" -eq 0 ]; then rm -rf \"\$remote_dir\"; elif sudo -n true >/dev/null 2>&1; then sudo -n rm -rf \"\$remote_dir\"; else printf '%s\n' \"\$sudo_pw\" | sudo -S -p '' rm -rf \"\$remote_dir\"; fi; exit \$rc"
+
+  log_ok "Starting remote Module 3: $target_role"
+  tar -C "$PROJECT_DIR" -czf - VERSION lib modules config 2>/dev/null | \
+    SSHPASS="$REMOTE_PASSWORD" sshpass -e ssh \
+      -p "$REMOTE_PORT" \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      -o IdentitiesOnly=yes \
+      -o PreferredAuthentications=password \
+      -o PubkeyAuthentication=no \
+      -o ConnectTimeout=10 \
+      "$REMOTE_USER@$REMOTE_HOST" "$remote_cmd"
+  log_ok "Remote Module 3 finished: $target_role"
+}
+
+run_remote_module3_role() {
+  local target_role="$1"
+  wait_for_remote_ssh "$target_role" || return 1
+  stream_remote_module3_role "$target_role"
+}
+
+run_remote_module3_role_optional() {
+  local target_role="$1"
+  if ! wait_for_remote_ssh "$target_role" 2 2 yes; then
+    log_warn "Skipping remote Module 3 for $target_role: no root-capable SSH from ISP"
+    return 0
+  fi
+  stream_remote_module3_role "$target_role"
+}
+
+fetch_hq_srv_certs_to_isp() {
+  if ! wait_for_remote_ssh "HQ-SRV" 2 2 yes; then
+    log_warn "Cannot fetch HTTPS cert archive from HQ-SRV: SSH unavailable"
+    return 0
+  fi
+  install_packages sshpass
+  SSHPASS="$REMOTE_PASSWORD" sshpass -e scp \
+    -P "$REMOTE_PORT" \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o IdentitiesOnly=yes \
+    -o PreferredAuthentications=password \
+    -o PubkeyAuthentication=no \
+    "$REMOTE_USER@$REMOTE_HOST:$CA_DIR/out/nginx-web-docker-certs.tar.gz" \
+    /tmp/nginx-web-docker-certs.tar.gz >/dev/null 2>&1 || \
+      log_warn "Cert archive was not copied from HQ-SRV. ISP nginx HTTPS may be skipped."
+}
+
+run_with_failure_capture() {
+  local description="$1"; shift
+  set +e
+  "$@"
+  local rc=$?
+  set -e
+  if [ "$rc" -ne 0 ]; then
+    log_error "$description"
+  fi
+  return "$rc"
+}
+
+run_module3_role_actions() {
+  local role="$1"
+  case "$role" in
   BR-SRV)
     run_if_needed "Module3 task1 import users" "[ -x /opt/import_users_module3.sh ]" setup_import_users_br_srv
     run_if_needed "Module3 rsyslog client" "grep -q '@$HQ_SRV_IP:514' /etc/rsyslog.d/90-demo-remote-forward.conf 2>/dev/null" setup_rsyslog_client
@@ -704,8 +881,37 @@ case "${ROLE:-}" in
     run_if_needed "Module3 nginx HTTPS proxy" "[ -f /etc/nginx/sites-enabled/demo-https-proxy ]" setup_nginx_https_isp
     ;;
   *)
-    log_skip "No Module 3 actions for role: ${ROLE:-unknown}"
+    log_skip "No Module 3 actions for role: ${role:-unknown}"
     ;;
-esac
+  esac
+}
+
+orchestrate_module3_from_isp() {
+  local failures=0 role
+  install_packages sshpass curl openssh-client
+
+  # First prepare remote nodes. HQ-SRV goes first because it generates CA/certs and monitoring DNS.
+  for role in $MODULE3_REMOTE_ROLES; do
+    run_with_failure_capture "Module 3 role failed: $role" run_remote_module3_role_optional "$role" || failures=$((failures + 1))
+    if [ "$role" = "HQ-SRV" ]; then
+      fetch_hq_srv_certs_to_isp || true
+    fi
+  done
+
+  # ISP is executed after remote nodes so nginx HTTPS can use the cert archive generated on HQ-SRV.
+  run_with_failure_capture "Module 3 role failed: ISP" run_module3_role_actions "ISP" || failures=$((failures + 1))
+
+  if [ "$failures" -gt 0 ]; then
+    log_error "Module 3 ISP orchestration completed with $failures failure(s)"
+    return 1
+  fi
+  log_ok "Module 3 ISP orchestration completed successfully"
+}
+
+if module3_orchestration_enabled; then
+  orchestrate_module3_from_isp
+else
+  run_module3_role_actions "${ROLE:-unknown}"
+fi
 
 log_ok "Module 3 completed for role: ${ROLE:-unknown}"
