@@ -450,6 +450,35 @@ prepare_iso_mount() {
   return 1
 }
 
+prepare_additional_workspace() {
+  local source_dir=""
+  local workspace="/mnt/additional"
+  local staging="$TMP_DIR/additional-source"
+
+  prepare_iso_mount || return 1
+  source_dir="$ISO_DIR"
+
+  rm -rf "$staging"
+  mkdir -p "$staging"
+
+  if [ "$source_dir" = "$workspace" ] && mountpoint -q "$workspace"; then
+    cp -a "$workspace"/. "$staging"/
+    umount "$workspace" 2>/dev/null || true
+    mkdir -p "$workspace"
+    cp -a "$staging"/. "$workspace"/
+  else
+    mkdir -p "$workspace"
+    if [ "$source_dir" != "$workspace" ]; then
+      cp -a "$source_dir"/. "$workspace"/
+    fi
+  fi
+
+  rm -rf "$staging"
+  chmod -R 755 "$workspace" 2>/dev/null || true
+  ADDITIONAL_WORKDIR="$workspace"
+  log_ok "Additional workspace prepared: $ADDITIONAL_WORKDIR"
+}
+
 infer_module2_defaults
 
 write_krb5_conf() {
@@ -476,7 +505,6 @@ setup_chrony_server() {
   install_packages chrony curl
   backup_file /etc/chrony/chrony.conf
   cat > /etc/chrony/chrony.conf <<EOF
-server 0.debian.pool.ntp.org iburst
 local stratum 5
 
 allow 172.16.0.0/12
@@ -510,7 +538,7 @@ EOF
 }
 
 setup_isp_proxy() {
-  install_packages nginx apache2-utils
+  install_packages nginx apache2-utils curl
   htpasswd -bc /etc/nginx/.htpasswd WEB "$ADMIN_PASSWORD"
   backup_file /etc/nginx/sites-available/reverse_proxy.conf
   cat > /etc/nginx/sites-available/reverse_proxy.conf <<EOF
@@ -613,32 +641,53 @@ find_blank_disks_for_raid() {
   done
 }
 
+ensure_raid_fstab_entry() {
+  local uuid=""
+  backup_file /etc/fstab
+  uuid="$(blkid -s UUID -o value /dev/md0p1 2>/dev/null || true)"
+  if [ -n "$uuid" ]; then
+    ensure_line /etc/fstab "UUID=$uuid /raid ext4 defaults,nofail 0 0"
+  else
+    ensure_line /etc/fstab "/dev/md0p1 /raid ext4 defaults,nofail 0 0"
+  fi
+}
+
 setup_raid_mount() {
   install_packages mdadm parted
-  if mountpoint -q /raid; then
-    log_skip "/raid already mounted"
-    return 0
-  fi
   mkdir -p /raid
-  mapfile -t disks < <(find_blank_disks_for_raid | head -n 2)
-  if [ "${#disks[@]}" -lt 2 ]; then
-    log_warn "Not enough blank disks for RAID0. /raid will stay as a directory."
-    return 0
-  fi
-  if [ "${MODULE2_CREATE_RAID:-yes}" != "yes" ]; then
-    log_warn "Blank disks found but MODULE2_CREATE_RAID is not yes; RAID creation skipped."
-    return 0
-  fi
-  mdadm --create /dev/md0 --level=0 --raid-devices=2 "${disks[0]}" "${disks[1]}" --force
   mkdir -p /etc/mdadm
-  mdadm --detail --scan > /etc/mdadm/mdadm.conf
-  update-initramfs -u || true
-  parted -s /dev/md0 mklabel gpt
-  parted -s /dev/md0 mkpart primary ext4 1MiB 100%
-  partprobe /dev/md0 || true
-  mkfs.ext4 -F /dev/md0p1
-  mount /dev/md0p1 /raid
-  ensure_line /etc/fstab "/dev/md0p1 /raid ext4 defaults,nofail 0 0"
+  if [ ! -b /dev/md0p1 ]; then
+    if [ ! -b /dev/md0 ]; then
+      mapfile -t disks < <(find_blank_disks_for_raid | head -n 2)
+      if [ "${#disks[@]}" -lt 2 ]; then
+        log_warn "Not enough blank disks for RAID0. /raid will stay as a directory."
+        return 0
+      fi
+      if [ "${MODULE2_CREATE_RAID:-yes}" != "yes" ]; then
+        log_warn "Blank disks found but MODULE2_CREATE_RAID is not yes; RAID creation skipped."
+        return 0
+      fi
+      mdadm --create /dev/md0 --level=0 --raid-devices=2 "${disks[0]}" "${disks[1]}" --force
+    fi
+
+    if [ ! -b /dev/md0p1 ]; then
+      parted -s /dev/md0 mklabel gpt
+      parted -s /dev/md0 mkpart primary ext4 1MiB 100%
+      partprobe /dev/md0 || true
+      sleep 2
+    fi
+  fi
+
+  if [ -b /dev/md0p1 ] && ! blkid /dev/md0p1 >/dev/null 2>&1; then
+    mkfs.ext4 -F /dev/md0p1
+  fi
+
+  if [ -b /dev/md0p1 ]; then
+    mountpoint -q /raid || mount /dev/md0p1 /raid || true
+    mdadm --detail --scan > /etc/mdadm/mdadm.conf
+    ensure_raid_fstab_entry
+    update-initramfs -u || true
+  fi
 }
 
 setup_nfs_server() {
@@ -665,7 +714,7 @@ sql_root() {
 }
 
 setup_hq_web() {
-  install_packages apache2 mariadb-server php php-mysql php-cli php-gd libapache2-mod-php
+  install_packages apache2 mariadb-server php php-mysql php-cli php-gd libapache2-mod-php curl
   service_restart_enable mariadb
   local admin_sql_password
   admin_sql_password="$(sql_literal_escape "$ADMIN_PASSWORD")"
@@ -674,22 +723,25 @@ setup_hq_web() {
   sql_root "GRANT ALL PRIVILEGES ON webdb.* TO 'web'@'localhost'; FLUSH PRIVILEGES;"
   sql_root "CREATE USER IF NOT EXISTS 'user'@'localhost' IDENTIFIED BY '$admin_sql_password';"
   sql_root "GRANT ALL PRIVILEGES ON webdb.* TO 'user'@'localhost'; FLUSH PRIVILEGES;"
-  prepare_iso_mount || { log_error "Additional ISO is required for HQ web files"; return 1; }
-  [ -d "$ISO_DIR/web" ] || { log_error "Web directory not found in Additional ISO: $ISO_DIR/web"; return 1; }
-  [ -f "$ISO_DIR/web/dump.sql" ] && { mariadb -u root webdb < "$ISO_DIR/web/dump.sql" || mysql -u root webdb < "$ISO_DIR/web/dump.sql" || true; }
-  [ -f "$ISO_DIR/web/index.php" ] && cp "$ISO_DIR/web/index.php" /var/www/html/index.php
+  prepare_additional_workspace || { log_error "Additional ISO is required for HQ web files"; return 1; }
+  [ -d "$ADDITIONAL_WORKDIR/web" ] || { log_error "Web directory not found in Additional workspace: $ADDITIONAL_WORKDIR/web"; return 1; }
+  [ -f "$ADDITIONAL_WORKDIR/web/dump.sql" ] && { mariadb -u root webdb < "$ADDITIONAL_WORKDIR/web/dump.sql" || mysql -u root webdb < "$ADDITIONAL_WORKDIR/web/dump.sql" || true; }
+  backup_file /var/www/html/index.php
+  [ -f "$ADDITIONAL_WORKDIR/web/index.php" ] && cp "$ADDITIONAL_WORKDIR/web/index.php" /var/www/html/index.php
   mkdir -p /var/www/html/images
-  [ -f "$ISO_DIR/web/logo.png" ] && cp "$ISO_DIR/web/logo.png" /var/www/html/images/logo.png
-  if [ -f /var/www/html/index.php ]; then
+  [ -f "$ADDITIONAL_WORKDIR/web/logo.png" ] && cp "$ADDITIONAL_WORKDIR/web/logo.png" /var/www/html/images/logo.png
+  if [ -s /var/www/html/index.php ]; then
     local web_password
     web_password="$(php_double_quoted_escape "$ADMIN_PASSWORD")"
     web_password="$(sed_replacement_escape "$web_password")"
-    sed -i 's/\$username *= *"[^"]*"/$username = "web"/' /var/www/html/index.php || true
-    sed -i "s/\\\$password *= *\"[^\"]*\"/\\\$password = \"$web_password\"/" /var/www/html/index.php || true
-    sed -i 's/$dbname *= *"[^"]*"/$dbname = "webdb"/' /var/www/html/index.php || true
+    sed -i -E 's/\$servername *= *"[^"]*";/\$servername = "localhost";/' /var/www/html/index.php || true
+    sed -i -E 's/\$username *= *"[^"]*";/\$username = "web";/' /var/www/html/index.php || true
+    sed -i -E "s/\\\$password *= *\"[^\"]*\";/\\\$password = \"$web_password\";/" /var/www/html/index.php || true
+    sed -i -E 's/\$dbname *= *"[^"]*";/\$dbname = "webdb";/' /var/www/html/index.php || true
   fi
-  rm -f /var/www/html/index.html
+  [ -f /var/www/html/index.html ] && mv /var/www/html/index.html /var/www/html/index.html.backup
   if [ -f /etc/apache2/mods-enabled/dir.conf ]; then
+    backup_file /etc/apache2/mods-enabled/dir.conf
     sed -i 's/DirectoryIndex .*/DirectoryIndex index.php index.html index.cgi index.pl index.xhtml index.htm/' /etc/apache2/mods-enabled/dir.conf
   fi
   command_exists a2enmod && a2enmod rewrite >/dev/null 2>&1 || true
@@ -705,10 +757,10 @@ setup_hq_web() {
 
 setup_import_users_from_csv() {
   local csv_src=""
-  prepare_iso_mount || { log_warn "Additional ISO not available, CSV import skipped"; return 0; }
+  prepare_additional_workspace || { log_warn "Additional ISO not available, CSV import skipped"; return 0; }
   for csv_src in \
-    "$ISO_DIR/$USERS_CSV_PATH" \
-    "$ISO_DIR/Users.csv" \
+    "$ADDITIONAL_WORKDIR/$USERS_CSV_PATH" \
+    "$ADDITIONAL_WORKDIR/Users.csv" \
     /media/cdrom0/Users.csv \
     /mnt/additional/Users.csv
   do
@@ -895,56 +947,56 @@ ensure_docker_database() {
 
 setup_docker_app_br_srv() {
   install_packages docker.io docker-compose curl
+  if ! command_exists docker; then
+    curl -fsSL https://get.docker.com | sh
+  fi
   service_restart_enable docker
-  prepare_iso_mount || return 1
-  [ -f "$ISO_DIR/$DOCKER_DB_TAR" ] && docker load -i "$ISO_DIR/$DOCKER_DB_TAR"
-  [ -f "$ISO_DIR/$DOCKER_SITE_TAR" ] && docker load -i "$ISO_DIR/$DOCKER_SITE_TAR"
+  prepare_additional_workspace || return 1
+  [ -f "$ADDITIONAL_WORKDIR/$DOCKER_DB_TAR" ] && docker load -i "$ADDITIONAL_WORKDIR/$DOCKER_DB_TAR"
+  [ -f "$ADDITIONAL_WORKDIR/$DOCKER_SITE_TAR" ] && docker load -i "$ADDITIONAL_WORKDIR/$DOCKER_SITE_TAR"
   retag_docker_image_if_needed "$DOCKER_DB_IMAGE" mariadb:latest
   require_docker_image "$DOCKER_SITE_IMAGE" || return 1
   require_docker_image "$DOCKER_DB_IMAGE" || return 1
-  mkdir -p /opt/testapp
-  local reset_volume="no"
-  if [ -f /opt/testapp/docker-compose.yml ] && { ! grep -q "DB_USER: \"$DOCKER_DB_USER\"" /opt/testapp/docker-compose.yml || ! grep -q "DB_PASS: \"$DOCKER_DB_PASSWORD\"" /opt/testapp/docker-compose.yml || ! grep -q "MARIADB_ROOT_PASSWORD: \"$DOCKER_DB_ROOT_PASSWORD\"" /opt/testapp/docker-compose.yml; }; then
-    reset_volume="yes"
-  fi
-  backup_file /opt/testapp/docker-compose.yml
-  cat > /opt/testapp/docker-compose.yml <<EOF
+  mkdir -p "$ADDITIONAL_WORKDIR/docker"
+  backup_file "$ADDITIONAL_WORKDIR/docker/docker-compose.yml"
+  cat > "$ADDITIONAL_WORKDIR/docker/docker-compose.yml" <<EOF
 version: '3.8'
 services:
-  testapp:
-    image: $DOCKER_SITE_IMAGE
-    container_name: testapp
-    ports:
-      - "8080:8000"
-    depends_on:
-      - db
-    environment:
-      - DB_HOST=db
-      - DB_NAME=$DOCKER_DB_NAME
-      - DB_TYPE=maria
-      - DB_USER=$DOCKER_DB_USER
-      - DB_PASS=$DOCKER_DB_PASSWORD
-      - SERVER_PORT=8080
-    restart: unless-stopped
-  db:
-    image: $DOCKER_DB_IMAGE
+  database:
     container_name: db
+    image: $DOCKER_DB_IMAGE
+    restart: always
+    ports:
+      - "3306:3306"
     environment:
-      - MARIADB_ROOT_PASSWORD=$DOCKER_DB_ROOT_PASSWORD
-      - MARIADB_DATABASE=$DOCKER_DB_NAME
-      - MARIADB_USER=$DOCKER_DB_USER
-      - MARIADB_PASSWORD=$DOCKER_DB_PASSWORD
+      MARIADB_DATABASE: "$DOCKER_DB_NAME"
+      MARIADB_USER: "$DOCKER_DB_USER"
+      MARIADB_PASSWORD: "$DOCKER_DB_PASSWORD"
+      MARIADB_ROOT_PASSWORD: "$DOCKER_DB_ROOT_PASSWORD"
     volumes:
       - db_data:/var/lib/mysql
-    restart: unless-stopped
+
+  app:
+    container_name: testapp
+    image: $DOCKER_SITE_IMAGE
+    restart: always
+    ports:
+      - "8080:8000"
+    environment:
+      DB_TYPE: "maria"
+      DB_HOST: "database"
+      DB_PORT: "3306"
+      DB_NAME: "$DOCKER_DB_NAME"
+      DB_USER: "$DOCKER_DB_USER"
+      DB_PASS: "$DOCKER_DB_PASSWORD"
+      SERVER_PORT: "8080"
+    depends_on:
+      - database
 volumes:
   db_data:
 EOF
-  cd /opt/testapp
-  if [ "$reset_volume" = "yes" ]; then
-    log_warn "Docker compose DB settings changed; resetting old testapp volume"
-    docker_compose_down_reset || true
-  fi
+  chmod -R 755 "$ADDITIONAL_WORKDIR"
+  cd "$ADDITIONAL_WORKDIR/docker"
   docker_compose_up
   ensure_docker_database || true
   docker restart db >/dev/null 2>&1 || true
@@ -1000,7 +1052,7 @@ setup_hq_cli_domain_nfs() {
   printf 'krb5-config krb5-config/default_realm string %s\n' "$REALM_UPPER" | debconf-set-selections 2>/dev/null || true
   printf 'krb5-config krb5-config/kerberos_servers string br-srv.%s\n' "$DOMAIN_LOWER" | debconf-set-selections 2>/dev/null || true
   printf 'krb5-config krb5-config/admin_server string br-srv.%s\n' "$DOMAIN_LOWER" | debconf-set-selections 2>/dev/null || true
-  install_packages openssh-server realmd sssd sssd-tools libnss-sss libpam-sss adcli samba-common-bin packagekit krb5-user nfs-common oddjob oddjob-mkhomedir dnsutils
+  install_packages openssh-server realmd sssd sssd-tools libnss-sss libpam-sss adcli samba-common samba-common-bin packagekit krb5-user nfs-common oddjob oddjob-mkhomedir dnsutils curl
   backup_file /etc/resolv.conf
   cat > /etc/resolv.conf <<EOF
 search $DOMAIN_LOWER
@@ -1011,7 +1063,11 @@ EOF
   enable_service_any ssh sshd
   restart_service_any ssh sshd
   realm discover "$DOMAIN_LOWER" >/dev/null 2>&1 || true
-  echo "$ADMIN_PASSWORD" | realm join -v --user=Administrator "$DOMAIN_LOWER" || log_warn "realm join failed or already joined"
+  if ! realm list 2>/dev/null | grep -qi "$DOMAIN_LOWER"; then
+    echo "$ADMIN_PASSWORD" | realm join -v --user=Administrator "$DOMAIN_LOWER" || log_warn "realm join failed"
+  else
+    log_skip "HQ-CLI already joined to domain"
+  fi
   enable_service sssd
   restart_service sssd
   kinit Administrator >/dev/null 2>&1 || true
@@ -1021,6 +1077,7 @@ EOF
   showmount -e "$HQ_SRV_IP" >/dev/null 2>&1 || true
   mkdir -p /mnt/nfs
   mountpoint -q /mnt/nfs || mount "$HQ_SRV_IP:$NFS_DIR" /mnt/nfs || log_warn "NFS mount failed; fstab still configured"
+  backup_file /etc/fstab
   ensure_line /etc/fstab "$HQ_SRV_IP:$NFS_DIR /mnt/nfs nfs defaults,_netdev 0 0"
   mount -a >/dev/null 2>&1 || true
   setup_yandex_browser_client
@@ -1041,30 +1098,44 @@ run_module2_role_actions() {
 
   case "$target_role" in
     ISP)
-    run_if_needed "ISP chrony server" "systemctl is-active --quiet chrony" setup_chrony_server
-    run_if_needed "ISP nginx reverse proxy" "systemctl is-active --quiet nginx && grep -q 'server_name web.$DOMAIN_LOWER;' /etc/nginx/sites-available/reverse_proxy.conf 2>/dev/null && grep -q 'server_name docker.$DOMAIN_LOWER;' /etc/nginx/sites-available/reverse_proxy.conf 2>/dev/null" setup_isp_proxy
+    log_ok "Apply ISP chrony server"
+    setup_chrony_server
+    log_ok "Apply ISP nginx reverse proxy"
+    setup_isp_proxy
     ;;
   HQ-RTR)
-    run_if_needed "HQ-RTR DNAT" "iptables -t nat -S 2>/dev/null | grep -q -- '--to-destination $HQ_SRV_IP:80' && iptables -t nat -S 2>/dev/null | grep -q -- '--to-destination $HQ_SRV_IP:8080'" "setup_router_dnat '$HQ_SRV_IP' '$HQ_RTR_WAN_IP' '${WAN_IFACE:-ens33}'"
+    log_ok "Apply HQ-RTR DNAT"
+    setup_router_dnat "$HQ_SRV_IP" "$HQ_RTR_WAN_IP" "${WAN_IFACE:-ens33}"
     ;;
   BR-RTR)
-    run_if_needed "BR-RTR chrony client" "systemctl is-active --quiet chrony" setup_chrony_client
-    run_if_needed "BR-RTR DNAT" "iptables -t nat -S 2>/dev/null | grep -q -- '--to-destination $BR_SRV_IP:80' && iptables -t nat -S 2>/dev/null | grep -q -- '--to-destination $BR_SRV_IP:8080'" "setup_router_dnat '$BR_SRV_IP' '$BR_RTR_WAN_IP' '${WAN_IFACE:-ens33}'"
+    log_ok "Apply BR-RTR chrony client"
+    setup_chrony_client
+    log_ok "Apply BR-RTR DNAT"
+    setup_router_dnat "$BR_SRV_IP" "$BR_RTR_WAN_IP" "${WAN_IFACE:-ens33}"
     ;;
   HQ-SRV)
-    run_if_needed "HQ-SRV chrony client" "systemctl is-active --quiet chrony" setup_chrony_client
-    run_if_needed "HQ-SRV DNS AD records" "grep -q '_kerberos IN TXT' /etc/bind/zones/db.$DOMAIN_LOWER 2>/dev/null && grep -q '_ldap._tcp.dc._msdcs' /etc/bind/zones/db.$DOMAIN_LOWER 2>/dev/null" setup_bind_ad_records
-    run_if_needed "HQ-SRV NFS server" "exportfs -v 2>/dev/null | grep -q '$NFS_DIR'" setup_nfs_server
-    run_if_needed "HQ-SRV web app" "systemctl is-active --quiet apache2 && [ -f /var/www/html/index.php ]" setup_hq_web
+    log_ok "Apply HQ-SRV chrony client"
+    setup_chrony_client
+    log_ok "Apply HQ-SRV DNS AD records"
+    setup_bind_ad_records
+    log_ok "Apply HQ-SRV NFS server"
+    setup_nfs_server
+    log_ok "Apply HQ-SRV web app"
+    setup_hq_web
     ;;
   BR-SRV)
-    run_if_needed "BR-SRV chrony client" "systemctl is-active --quiet chrony" setup_chrony_client
-    run_if_needed "BR-SRV Samba AD DC" "systemctl is-active --quiet samba-ad-dc && samba-tool domain info 127.0.0.1 2>/dev/null | grep -qi '$REALM_UPPER'" setup_samba_dc
-    run_if_needed "BR-SRV Ansible config" "[ -f /etc/ansible/hosts ] && grep -qi 'hq-srv' /etc/ansible/hosts" setup_ansible_br_srv
-    run_if_needed "BR-SRV Docker app" "docker ps --format '{{.Names}}' 2>/dev/null | grep -qx testapp && grep -q 'DB_USER: \"$DOCKER_DB_USER\"' /opt/testapp/docker-compose.yml 2>/dev/null && grep -q 'DB_PASS: \"$DOCKER_DB_PASSWORD\"' /opt/testapp/docker-compose.yml 2>/dev/null" setup_docker_app_br_srv
+    log_ok "Apply BR-SRV chrony client"
+    setup_chrony_client
+    log_ok "Apply BR-SRV Samba AD DC"
+    setup_samba_dc
+    log_ok "Apply BR-SRV Ansible config"
+    setup_ansible_br_srv
+    log_ok "Apply BR-SRV Docker app"
+    setup_docker_app_br_srv
     ;;
   HQ-CLI)
-    run_if_needed "HQ-CLI domain and NFS client" "realm list 2>/dev/null | grep -qi '$DOMAIN_LOWER' && grep -q '$HQ_SRV_IP:$NFS_DIR' /etc/fstab 2>/dev/null" setup_hq_cli_domain_nfs
+    log_ok "Apply HQ-CLI domain and NFS client"
+    setup_hq_cli_domain_nfs
     ;;
   *)
     log_skip "No Module 2 actions for role: $target_role"
