@@ -34,7 +34,8 @@ SSH_ROUTER_USER="${SSH_ROUTER_USER:-net_admin}"
 SSH_ROUTER_PASSWORD="${SSH_ROUTER_PASSWORD:-$ADMIN_PASSWORD}"
 SSH_ROUTER_PORT="${SSH_ROUTER_PORT:-2026}"
 HQ_CLI_ANSIBLE_USER="${HQ_CLI_ANSIBLE_USER:-user}"
-HQ_CLI_ANSIBLE_PASSWORD="${HQ_CLI_ANSIBLE_PASSWORD:-}"
+HQ_CLI_ANSIBLE_PASSWORD="${HQ_CLI_ANSIBLE_PASSWORD:-root}"
+HQ_CLI_ANSIBLE_PORT="${HQ_CLI_ANSIBLE_PORT:-22}"
 NFS_DIR="${NFS_DIR:-/raid/nfs}"
 NTP_SERVER_IP="${NTP_SERVER_IP:-}"
 ISO_DIR="${ISO_MOUNTPOINT:-/mnt/additional}"
@@ -45,6 +46,8 @@ DOCKER_DB_IMAGE="${DOCKER_DB_IMAGE:-mariadb:10.11}"
 DOCKER_DB_TAR="${DOCKER_DB_TAR:-docker/mariadb_latest.tar}"
 DOCKER_SITE_TAR="${DOCKER_SITE_TAR:-docker/site_latest.tar}"
 USERS_CSV_PATH="${USERS_CSV_PATH:-Users.csv}"
+MODULE2_REMOTE_TMP_ROOT="${MODULE2_REMOTE_TMP_ROOT:-/tmp/demo-autoconfig-module2}"
+MODULE2_ORCHESTRATE_FROM_ISP="${MODULE2_ORCHESTRATE_FROM_ISP:-auto}"
 
 run_if_needed() {
   local title="$1"
@@ -74,6 +77,17 @@ ensure_sudoers_file() {
   if command_exists visudo; then
     visudo -cf "$file" >/dev/null
   fi
+}
+
+ensure_runtime_default() {
+  local var_name="$1"
+  local fallback="$2"
+  if [ -n "${!var_name:-}" ]; then
+    return 0
+  fi
+  printf -v "$var_name" '%s' "$fallback"
+  upsert_kv_config "$CONFIG_FILE" "$var_name" "${!var_name}"
+  log_warn "$var_name was empty. Using workbook default: ${!var_name}"
 }
 
 sed_replacement_escape() {
@@ -264,6 +278,147 @@ wait_for_check() {
   return 1
 }
 
+module2_orchestration_enabled() {
+  [ "$ROLE" = "ISP" ] || return 1
+  [ "${DEMO_SKIP_MODULE2_ORCHESTRATION:-no}" != "yes" ] || return 1
+  [ "$MODULE2_ORCHESTRATE_FROM_ISP" != "no" ] || return 1
+}
+
+remote_ssh_exec() {
+  local password="$1"
+  local port="$2"
+  local user="$3"
+  local host="$4"
+  shift 4
+  SSHPASS="$password" sshpass -e ssh \
+    -p "$port" \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o IdentitiesOnly=yes \
+    -o PreferredAuthentications=password \
+    -o PubkeyAuthentication=no \
+    -o ConnectTimeout=10 \
+    "$user@$host" "$@"
+}
+
+resolve_remote_connection() {
+  local target_role="$1"
+  REMOTE_HOST=""
+  REMOTE_USER=""
+  REMOTE_PASSWORD=""
+  REMOTE_PORT=""
+
+  case "$target_role" in
+    HQ-RTR)
+      REMOTE_HOST="$HQ_RTR_WAN_IP"
+      REMOTE_USER="$SSH_ROUTER_USER"
+      REMOTE_PASSWORD="$SSH_ROUTER_PASSWORD"
+      REMOTE_PORT="$SSH_ROUTER_PORT"
+      ;;
+    BR-RTR)
+      REMOTE_HOST="$BR_RTR_WAN_IP"
+      REMOTE_USER="$SSH_ROUTER_USER"
+      REMOTE_PASSWORD="$SSH_ROUTER_PASSWORD"
+      REMOTE_PORT="$SSH_ROUTER_PORT"
+      ;;
+    HQ-SRV)
+      REMOTE_HOST="$HQ_SRV_IP"
+      REMOTE_USER="$SSH_SERVER_USER"
+      REMOTE_PASSWORD="$SSH_SERVER_PASSWORD"
+      REMOTE_PORT="$SSH_SERVER_PORT"
+      ;;
+    BR-SRV)
+      REMOTE_HOST="$BR_SRV_IP"
+      REMOTE_USER="$SSH_SERVER_USER"
+      REMOTE_PASSWORD="$SSH_SERVER_PASSWORD"
+      REMOTE_PORT="$SSH_SERVER_PORT"
+      ;;
+    HQ-CLI)
+      REMOTE_HOST="$HQ_CLI_IP"
+      REMOTE_USER="$HQ_CLI_ANSIBLE_USER"
+      REMOTE_PASSWORD="$HQ_CLI_ANSIBLE_PASSWORD"
+      REMOTE_PORT="$HQ_CLI_ANSIBLE_PORT"
+      ;;
+    *)
+      log_error "Unknown remote Module 2 role: $target_role"
+      return 1
+      ;;
+  esac
+
+  if [ -z "$REMOTE_HOST" ] || [ -z "$REMOTE_USER" ] || [ -z "$REMOTE_PASSWORD" ] || [ -z "$REMOTE_PORT" ]; then
+    log_error "Remote connection parameters are incomplete for $target_role"
+    return 1
+  fi
+}
+
+wait_for_remote_ssh() {
+  local target_role="$1"
+  local attempt
+  resolve_remote_connection "$target_role" || return 1
+
+  for attempt in $(seq 1 12); do
+    if remote_ssh_exec "$REMOTE_PASSWORD" "$REMOTE_PORT" "$REMOTE_USER" "$REMOTE_HOST" true >/dev/null 2>&1; then
+      log_ok "SSH is reachable for $target_role at $REMOTE_HOST:$REMOTE_PORT"
+      return 0
+    fi
+    sleep 5
+  done
+
+  log_error "Could not reach $target_role over SSH at $REMOTE_HOST:$REMOTE_PORT"
+  return 1
+}
+
+run_remote_module2_role() {
+  local target_role="$1"
+  local remote_dir remote_cmd
+
+  wait_for_remote_ssh "$target_role" || return 1
+  remote_dir="$MODULE2_REMOTE_TMP_ROOT/${target_role,,}"
+  remote_cmd="remote_dir='$remote_dir'; rm -rf \"\$remote_dir\"; mkdir -p \"\$remote_dir\"; tar -xzf - -C \"\$remote_dir\" || { rc=\$?; rm -rf \"\$remote_dir\"; exit \$rc; }; rc=0; DEMO_SKIP_MODULE2_ORCHESTRATION=yes bash \"\$remote_dir/modules/module2.sh\" || rc=\$?; rm -rf \"\$remote_dir\"; exit \$rc"
+
+  log_ok "Starting remote Module 2: $target_role"
+  tar -C "$PROJECT_DIR" -czf - VERSION lib modules | \
+    SSHPASS="$REMOTE_PASSWORD" sshpass -e ssh \
+      -p "$REMOTE_PORT" \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      -o IdentitiesOnly=yes \
+      -o PreferredAuthentications=password \
+      -o PubkeyAuthentication=no \
+      -o ConnectTimeout=10 \
+      "$REMOTE_USER@$REMOTE_HOST" "$remote_cmd"
+  log_ok "Remote Module 2 finished: $target_role"
+}
+
+verify_module2_from_hq_cli() {
+  local verify_cmd
+  wait_for_remote_ssh "HQ-CLI" || return 1
+  verify_cmd="curl -fsS -u 'WEB:$ADMIN_PASSWORD' http://web.$DOMAIN_LOWER/ >/dev/null && curl -fsS http://docker.$DOMAIN_LOWER/ >/dev/null"
+  if wait_for_check 12 5 "remote_ssh_exec '$REMOTE_PASSWORD' '$REMOTE_PORT' '$REMOTE_USER' '$REMOTE_HOST' \"$verify_cmd\""; then
+    log_ok "HQ-CLI verified http://web.$DOMAIN_LOWER/ and http://docker.$DOMAIN_LOWER/"
+  else
+    log_error "HQ-CLI could not verify both Module 2 web endpoints"
+    return 1
+  fi
+}
+
+orchestrate_module2_from_isp() {
+  ensure_runtime_default HQ_CLI_ANSIBLE_USER user
+  ensure_runtime_default HQ_CLI_ANSIBLE_PASSWORD root
+  ensure_runtime_default HQ_CLI_ANSIBLE_PORT 22
+  install_packages sshpass curl
+
+  run_remote_module2_role "BR-SRV"
+  run_remote_module2_role "HQ-SRV"
+  run_remote_module2_role "HQ-RTR"
+  run_remote_module2_role "BR-RTR"
+  run_module2_role_actions "ISP"
+  run_remote_module2_role "HQ-CLI"
+  verify_module2_from_hq_cli
+
+  log_ok "Module 2 orchestration completed from ISP"
+}
+
 prepare_iso_mount() {
   local candidate
   for candidate in "$ISO_DIR" /media/cdrom0 /mnt/additional /tmp/additional; do
@@ -324,7 +479,14 @@ local stratum 5
 
 allow 172.16.0.0/12
 allow 192.168.0.0/16
-log measurements statistics tracking
+bindaddress 0.0.0.0
+
+driftfile /var/lib/chrony/chrony.drift
+
+log tracking measurements statistics
+logdir /var/log/chrony
+
+rtcsync
 EOF
   service_restart_enable chrony
 }
@@ -409,10 +571,12 @@ setup_router_dnat() {
   ensure_iptables_rule nat PREROUTING "${prerouting_match[@]}" -p udp --dport 8080 -j DNAT --to-destination "$dest:8080"
   ensure_iptables_rule nat PREROUTING "${prerouting_match[@]}" -p tcp --dport 80 -j DNAT --to-destination "$dest:80"
   ensure_iptables_rule nat PREROUTING "${prerouting_match[@]}" -p tcp --dport 2026 -j DNAT --to-destination "$dest:2026"
+  ensure_iptables_rule nat PREROUTING "${prerouting_match[@]}" -p udp --dport 2026 -j DNAT --to-destination "$dest:2026"
   ensure_iptables_rule filter FORWARD -p tcp -d "$dest" --dport 8080 -j ACCEPT
   ensure_iptables_rule filter FORWARD -p udp -d "$dest" --dport 8080 -j ACCEPT
   ensure_iptables_rule filter FORWARD -p tcp -d "$dest" --dport 80 -j ACCEPT
   ensure_iptables_rule filter FORWARD -p tcp -d "$dest" --dport 2026 -j ACCEPT
+  ensure_iptables_rule filter FORWARD -p udp -d "$dest" --dport 2026 -j ACCEPT
   save_iptables_rules
 }
 
@@ -526,6 +690,7 @@ setup_hq_web() {
   if [ -f /etc/apache2/mods-enabled/dir.conf ]; then
     sed -i 's/DirectoryIndex .*/DirectoryIndex index.php index.html index.cgi index.pl index.xhtml index.htm/' /etc/apache2/mods-enabled/dir.conf
   fi
+  command_exists a2enmod && a2enmod rewrite >/dev/null 2>&1 || true
   chown -R www-data:www-data /var/www/html
   chmod -R 755 /var/www/html
   service_restart_enable apache2
@@ -581,6 +746,7 @@ EOF
 setup_samba_dc() {
   install_packages samba winbind libnss-winbind krb5-user smbclient ldb-tools python3-cryptography expect sshpass
   write_krb5_conf
+  ensure_line /etc/hosts "$BR_SRV_IP br-srv.$DOMAIN_LOWER br-srv"
   if samba-tool domain info 127.0.0.1 2>/dev/null | grep -qi "$REALM_UPPER"; then
     log_skip "Samba domain already provisioned"
   else
@@ -618,18 +784,20 @@ setup_ansible_br_srv() {
   install_packages ansible sshpass
   mkdir -p /etc/ansible
   local hq_cli_inventory
-  hq_cli_inventory="HQ-CLI ansible_host=$HQ_CLI_IP ansible_port=${HQ_CLI_ANSIBLE_PORT:-$SSH_SERVER_PORT} ansible_user=$HQ_CLI_ANSIBLE_USER"
-  [ -n "$HQ_CLI_ANSIBLE_PASSWORD" ] && hq_cli_inventory="$hq_cli_inventory ansible_password=$HQ_CLI_ANSIBLE_PASSWORD"
+  hq_cli_inventory="hq-cli ansible_host=$HQ_CLI_IP ansible_port=$HQ_CLI_ANSIBLE_PORT ansible_user=$HQ_CLI_ANSIBLE_USER ansible_password=$HQ_CLI_ANSIBLE_PASSWORD ansible_become=false"
   backup_file /etc/ansible/hosts
   cat > /etc/ansible/hosts <<EOF
-[hq]
-HQ-SRV ansible_host=$HQ_SRV_IP ansible_port=$SSH_SERVER_PORT ansible_user=$SSH_SERVER_USER ansible_password=$SSH_SERVER_PASSWORD
+[servers]
+hq-srv ansible_host=$HQ_SRV_IP ansible_port=$SSH_SERVER_PORT ansible_user=$SSH_SERVER_USER ansible_password=$SSH_SERVER_PASSWORD
 $hq_cli_inventory
-HQ-RTR ansible_host=$HQ_RTR_HQ_IP ansible_port=$SSH_ROUTER_PORT ansible_user=$SSH_ROUTER_USER ansible_password=$SSH_ROUTER_PASSWORD
 
-[br]
-BR-SRV ansible_connection=local ansible_user=root
-BR-RTR ansible_host=$BR_RTR_LAN_IP ansible_port=$SSH_ROUTER_PORT ansible_user=$SSH_ROUTER_USER ansible_password=$SSH_ROUTER_PASSWORD
+[routers]
+hq-rtr ansible_host=$HQ_RTR_HQ_IP ansible_port=$SSH_ROUTER_PORT ansible_user=$SSH_ROUTER_USER ansible_password=$SSH_ROUTER_PASSWORD
+br-rtr ansible_host=$BR_RTR_LAN_IP ansible_port=$SSH_ROUTER_PORT ansible_user=$SSH_ROUTER_USER ansible_password=$SSH_ROUTER_PASSWORD
+
+[all:children]
+servers
+routers
 
 [all:vars]
 ansible_become=yes
@@ -641,6 +809,16 @@ EOF
 [defaults]
 inventory = /etc/ansible/hosts
 host_key_checking = False
+forks = 10
+timeout = 10
+interpreter_python = auto
+remote_tmp = /tmp/.ansible-${USER}
+
+[privilege_escalation]
+become = True
+become_method = sudo
+become_user = root
+become_ask_pass = False
 EOF
   mkdir -p /root/.ssh
   if [ ! -f /root/.ssh/id_rsa ]; then
@@ -794,7 +972,6 @@ configure_hq_domain_sudoers() {
 
 setup_yandex_browser_client() {
   [ "${YANDEX_BROWSER_ENABLE:-yes}" = "yes" ] || { log_skip "Yandex Browser disabled"; return 0; }
-  install_packages curl gnupg ca-certificates
   prepare_iso_mount || true
   local local_deb=""
   if [ -d "$ISO_DIR" ]; then
@@ -812,18 +989,7 @@ setup_yandex_browser_client() {
       return 0
     fi
   fi
-  mkdir -p /usr/share/keyrings "$TMP_DIR"
-  local key_tmp="$TMP_DIR/yandex-browser-key.gpg"
-  rm -f /usr/share/keyrings/yandex-browser.gpg
-  if curl -fsSL -o "$key_tmp" https://repo.yandex.ru/yandex-browser/YANDEX-BROWSER-KEY.GPG \
-    && gpg --batch --yes --dearmor -o /usr/share/keyrings/yandex-browser.gpg "$key_tmp"; then
-    echo "deb [signed-by=/usr/share/keyrings/yandex-browser.gpg] https://repo.yandex.ru/yandex-browser/deb stable main" > /etc/apt/sources.list.d/yandex-browser.list
-    apt_get_retry update || true
-    install_packages yandex-browser-stable || log_warn "Yandex Browser package was not installed"
-  else
-    log_warn "Could not fetch Yandex Browser repository key"
-  fi
-  rm -f "$key_tmp"
+  log_skip "Yandex Browser .deb was not found in Additional ISO"
 }
 
 setup_hq_cli_domain_nfs() {
@@ -832,21 +998,28 @@ setup_hq_cli_domain_nfs() {
   printf 'krb5-config krb5-config/default_realm string %s\n' "$REALM_UPPER" | debconf-set-selections 2>/dev/null || true
   printf 'krb5-config krb5-config/kerberos_servers string br-srv.%s\n' "$DOMAIN_LOWER" | debconf-set-selections 2>/dev/null || true
   printf 'krb5-config krb5-config/admin_server string br-srv.%s\n' "$DOMAIN_LOWER" | debconf-set-selections 2>/dev/null || true
-  install_packages openssh-server realmd sssd sssd-tools libnss-sss libpam-sss adcli samba-common-bin packagekit krb5-user nfs-common oddjob oddjob-mkhomedir
-  if command_exists sed && [ -f /etc/ssh/sshd_config ]; then
-    sed -i "s/^[#[:space:]]*Port[[:space:]].*/Port ${SSH_SERVER_PORT}/" /etc/ssh/sshd_config
-    grep -q "^Port ${SSH_SERVER_PORT}$" /etc/ssh/sshd_config || printf 'Port %s\n' "$SSH_SERVER_PORT" >> /etc/ssh/sshd_config
-  fi
+  install_packages openssh-server realmd sssd sssd-tools libnss-sss libpam-sss adcli samba-common-bin packagekit krb5-user nfs-common oddjob oddjob-mkhomedir dnsutils
+  backup_file /etc/resolv.conf
+  cat > /etc/resolv.conf <<EOF
+search $DOMAIN_LOWER
+domain $DOMAIN_LOWER
+nameserver $BR_SRV_IP
+nameserver $HQ_SRV_IP
+EOF
+  enable_service_any ssh sshd
   restart_service_any ssh sshd
+  realm discover "$DOMAIN_LOWER" >/dev/null 2>&1 || true
   echo "$ADMIN_PASSWORD" | realm join -v --user=Administrator "$DOMAIN_LOWER" || log_warn "realm join failed or already joined"
+  enable_service sssd
+  restart_service sssd
   kinit Administrator >/dev/null 2>&1 || true
   klist >/dev/null 2>&1 || true
   configure_hq_domain_sudoers
   pam-auth-update --enable mkhomedir --force 2>/dev/null || true
   showmount -e "$HQ_SRV_IP" >/dev/null 2>&1 || true
   mkdir -p /mnt/nfs
-  mountpoint -q /mnt/nfs || mount "$HQ_SRV_IP:/raid/nfs" /mnt/nfs || log_warn "NFS mount failed; fstab still configured"
-  ensure_line /etc/fstab "$HQ_SRV_IP:/raid/nfs /mnt/nfs nfs defaults,_netdev 0 0"
+  mountpoint -q /mnt/nfs || mount "$HQ_SRV_IP:$NFS_DIR" /mnt/nfs || log_warn "NFS mount failed; fstab still configured"
+  ensure_line /etc/fstab "$HQ_SRV_IP:$NFS_DIR /mnt/nfs nfs defaults,_netdev 0 0"
   mount -a >/dev/null 2>&1 || true
   setup_yandex_browser_client
   if wait_for_check 12 5 "curl -fsS -u 'WEB:$ADMIN_PASSWORD' http://web.$DOMAIN_LOWER/"; then
@@ -861,13 +1034,15 @@ setup_hq_cli_domain_nfs() {
   fi
 }
 
-case "$ROLE" in
-  ISP)
+run_module2_role_actions() {
+  local target_role="$1"
+
+  case "$target_role" in
+    ISP)
     run_if_needed "ISP chrony server" "systemctl is-active --quiet chrony" setup_chrony_server
     run_if_needed "ISP nginx reverse proxy" "systemctl is-active --quiet nginx && grep -q 'server_name web.$DOMAIN_LOWER;' /etc/nginx/sites-available/reverse_proxy.conf 2>/dev/null && grep -q 'server_name docker.$DOMAIN_LOWER;' /etc/nginx/sites-available/reverse_proxy.conf 2>/dev/null" setup_isp_proxy
     ;;
   HQ-RTR)
-    run_if_needed "HQ-RTR chrony client" "systemctl is-active --quiet chrony" setup_chrony_client
     run_if_needed "HQ-RTR DNAT" "iptables -t nat -S 2>/dev/null | grep -q -- '--to-destination $HQ_SRV_IP:80' && iptables -t nat -S 2>/dev/null | grep -q -- '--to-destination $HQ_SRV_IP:8080'" "setup_router_dnat '$HQ_SRV_IP' '$HQ_RTR_WAN_IP' '${WAN_IFACE:-ens33}'"
     ;;
   BR-RTR)
@@ -887,11 +1062,18 @@ case "$ROLE" in
     run_if_needed "BR-SRV Docker app" "docker ps --format '{{.Names}}' 2>/dev/null | grep -qx testapp && grep -q 'DB_USER: \"$DOCKER_DB_USER\"' /opt/testapp/docker-compose.yml 2>/dev/null && grep -q 'DB_PASS: \"$DOCKER_DB_PASSWORD\"' /opt/testapp/docker-compose.yml 2>/dev/null" setup_docker_app_br_srv
     ;;
   HQ-CLI)
-    run_if_needed "HQ-CLI domain and NFS client" "realm list 2>/dev/null | grep -qi '$DOMAIN_LOWER' && grep -q '$HQ_SRV_IP:/raid/nfs' /etc/fstab 2>/dev/null" setup_hq_cli_domain_nfs
+    run_if_needed "HQ-CLI domain and NFS client" "realm list 2>/dev/null | grep -qi '$DOMAIN_LOWER' && grep -q '$HQ_SRV_IP:$NFS_DIR' /etc/fstab 2>/dev/null" setup_hq_cli_domain_nfs
     ;;
   *)
-    log_skip "No Module 2 actions for role: $ROLE"
+    log_skip "No Module 2 actions for role: $target_role"
     ;;
-esac
+  esac
+}
+
+if module2_orchestration_enabled; then
+  orchestrate_module2_from_isp
+else
+  run_module2_role_actions "$ROLE"
+fi
 
 log_ok "Module 2 completed for role: $ROLE"

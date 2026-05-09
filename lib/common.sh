@@ -91,3 +91,37 @@ write_kv_config() {
     printf '%s=%q\n' "$key" "$value" >> "$file"
   done
 }
+
+upsert_kv_config() {
+  local file="$1"
+  local key="$2"
+  local value="$3"
+  local tmp
+  local line
+
+  mkdir -p "$(dirname "$file")"
+  touch "$file"
+  chmod 600 "$file"
+  line="$(printf '%s=%q' "$key" "$value")"
+  tmp="$(mktemp)"
+
+  awk -v key="$key" -v line="$line" '
+    BEGIN { done = 0 }
+    index($0, key "=") == 1 {
+      if (!done) {
+        print line
+        done = 1
+      }
+      next
+    }
+    { print }
+    END {
+      if (!done) {
+        print line
+      }
+    }
+  ' "$file" > "$tmp"
+
+  mv "$tmp" "$file"
+  chmod 600 "$file"
+}
