@@ -404,19 +404,38 @@ verify_module2_from_hq_cli() {
   fi
 }
 
+run_with_failure_capture() {
+  local description="$1"
+  shift
+  set +e
+  "$@"
+  local rc=$?
+  set -e
+  if [ "$rc" -ne 0 ]; then
+    log_error "$description"
+  fi
+  return "$rc"
+}
+
 orchestrate_module2_from_isp() {
+  local failures=0
   ensure_runtime_default HQ_CLI_ANSIBLE_USER user
   ensure_runtime_default HQ_CLI_ANSIBLE_PASSWORD root
   ensure_runtime_default HQ_CLI_ANSIBLE_PORT 22
   install_packages sshpass curl
 
-  run_remote_module2_role "BR-SRV"
-  run_remote_module2_role "HQ-SRV"
-  run_remote_module2_role "HQ-RTR"
-  run_remote_module2_role "BR-RTR"
-  run_module2_role_actions "ISP"
-  run_remote_module2_role "HQ-CLI"
-  verify_module2_from_hq_cli
+  run_with_failure_capture "Module 2 role failed: ISP" run_module2_role_actions "ISP" || failures=$((failures + 1))
+  run_with_failure_capture "Module 2 role failed: HQ-SRV" run_remote_module2_role "HQ-SRV" || failures=$((failures + 1))
+  run_with_failure_capture "Module 2 role failed: BR-SRV" run_remote_module2_role "BR-SRV" || failures=$((failures + 1))
+  run_with_failure_capture "Module 2 role failed: HQ-RTR" run_remote_module2_role "HQ-RTR" || failures=$((failures + 1))
+  run_with_failure_capture "Module 2 role failed: BR-RTR" run_remote_module2_role "BR-RTR" || failures=$((failures + 1))
+  run_with_failure_capture "Module 2 role failed: HQ-CLI" run_remote_module2_role "HQ-CLI" || failures=$((failures + 1))
+  run_with_failure_capture "Module 2 endpoint verification failed" verify_module2_from_hq_cli || failures=$((failures + 1))
+
+  if [ "$failures" -gt 0 ]; then
+    log_error "Module 2 orchestration completed with $failures failure(s)"
+    return 1
+  fi
 
   log_ok "Module 2 orchestration completed from ISP"
 }
@@ -610,9 +629,66 @@ setup_router_dnat() {
   save_iptables_rules
 }
 
+bind_abs_name_m2() {
+  local name="$1"
+  local zone="$2"
+  case "$name" in
+    @) printf '%s.' "$zone" ;;
+    *.) printf '%s' "$name" ;;
+    *.*) printf '%s.' "$name" ;;
+    *) printf '%s.%s.' "$name" "$zone" ;;
+  esac
+}
+
+render_forward_zone_m2() {
+  local zone="$1"
+  local zone_file="$2"
+  local serial="${BIND_ZONE_SERIAL:-2025101302}"
+  local ns_name="${BIND_NS_NAME:-ns1}"
+  local ns_ip="${BIND_NS_IP:-192.168.100.2}"
+  local apex_ip="${BIND_APEX_IP:-$ns_ip}"
+  local record name ip
+
+  BIND_FORWARD_RECORDS="${BIND_FORWARD_RECORDS:-hq-rtr:192.168.100.1 br-rtr:192.168.255.1 hq-srv:192.168.100.2 hq-cli:192.168.200.2 br-srv:192.168.255.2 docker:172.16.1.1 web:172.16.2.1}"
+
+  {
+    printf '$TTL 3600\n'
+    printf '@ IN SOA %s %s (\n' "$(bind_abs_name_m2 "$ns_name" "$zone")" "$(bind_abs_name_m2 "${BIND_ADMIN_NAME:-admin}" "$zone")"
+    printf '  %s ; Serial\n' "$serial"
+    printf '  3600\n'
+    printf '  1800\n'
+    printf '  1209600\n'
+    printf '  300 )\n\n'
+    printf '@ IN NS %s\n' "$(bind_abs_name_m2 "$ns_name" "$zone")"
+    printf '%s IN A %s\n\n' "$ns_name" "$ns_ip"
+    [ -n "$apex_ip" ] && printf '@ IN A %s\n' "$apex_ip"
+    for record in $BIND_FORWARD_RECORDS; do
+      name="${record%%:*}"
+      ip="${record#*:}"
+      [ -n "$name" ] && [ -n "$ip" ] && [ "$name" != "$ip" ] || continue
+      [ "$name" = "$ns_name" ] && continue
+      printf '%s IN A %s\n' "$name" "$ip"
+    done
+  } > "$zone_file"
+}
+
 setup_bind_ad_records() {
   local zone_file="/etc/bind/zones/db.$DOMAIN_LOWER"
-  [ -f "$zone_file" ] || { log_warn "DNS zone file not found: $zone_file"; return 0; }
+  install_packages bind9 bind9utils bind9-dnsutils || install_packages bind9 bind9utils dnsutils
+  mkdir -p /etc/bind/zones
+  if [ ! -s "$zone_file" ]; then
+    render_forward_zone_m2 "$DOMAIN_LOWER" "$zone_file"
+  fi
+  if [ -f /etc/bind/named.conf.local ] && ! grep -q "zone \"$DOMAIN_LOWER\"" /etc/bind/named.conf.local 2>/dev/null; then
+    backup_file /etc/bind/named.conf.local
+    cat >> /etc/bind/named.conf.local <<EOF
+zone "$DOMAIN_LOWER" {
+    type master;
+    file "$zone_file";
+};
+
+EOF
+  fi
   backup_file "$zone_file"
   ensure_line "$zone_file" "_ldap._tcp IN SRV 0 100 389 br-srv.$DOMAIN_LOWER."
   ensure_line "$zone_file" "_kerberos._tcp IN SRV 0 100 88 br-srv.$DOMAIN_LOWER."
@@ -622,6 +698,9 @@ setup_bind_ad_records() {
   ensure_line "$zone_file" "_gc._tcp IN SRV 0 100 3268 br-srv.$DOMAIN_LOWER."
   ensure_line "$zone_file" "_ldap._tcp.dc._msdcs IN SRV 0 100 389 br-srv.$DOMAIN_LOWER."
   ensure_line "$zone_file" "_kerberos IN TXT \"$REALM_UPPER\""
+  if command_exists named-checkconf; then
+    named-checkconf /etc/bind/named.conf || true
+  fi
   if command_exists named-checkzone; then
     named-checkzone "$DOMAIN_LOWER" "$zone_file"
   fi
