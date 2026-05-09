@@ -400,7 +400,7 @@ ensure_local_user() {
 
 configure_role_users() {
   case "${ROLE:-}" in
-    HQ-SRV|BR-SRV)
+    HQ-SRV|BR-SRV|HQ-CLI)
       [ "${SSH_REMOTE_USER:-}" = "remote_user" ] && SSH_REMOTE_USER="user"
       SSH_REMOTE_USER="${SSH_REMOTE_USER:-user}"
       SSH_USER="${SSH_USER:-sshuser}"
@@ -414,7 +414,7 @@ configure_role_users() {
   esac
 
   case "${ROLE:-}" in
-    HQ-SRV|BR-SRV)
+    HQ-SRV|BR-SRV|HQ-CLI)
       ensure_local_user "${SSH_REMOTE_USER:-user}" "" "" "no"
       ensure_local_user "${SSH_USER:-sshuser}" "${SSH_PASSWORD:-P@ssw0rd}" "${SSH_USER_UID:-2026}" "yes"
       ;;

@@ -405,7 +405,9 @@ resolve_hq_cli_connection() {
   done
 
   try_connection_candidate "HQ-CLI" "$HQ_CLI_IP" "$HQ_CLI_ANSIBLE_USER" "$HQ_CLI_ANSIBLE_PASSWORD" "$HQ_CLI_ANSIBLE_PORT" && return 0
+  try_connection_candidate "HQ-CLI" "$HQ_CLI_IP" "$SSH_SERVER_USER" "$SSH_SERVER_PASSWORD" 22 && return 0
   try_connection_candidate "HQ-CLI" "$HQ_CLI_IP" "$SSH_SERVER_USER" "$SSH_SERVER_PASSWORD" "$SSH_SERVER_PORT" && return 0
+  try_connection_candidate "HQ-CLI" "$HQ_CLI_IP" "$SSH_REMOTE_USER" "${SSH_SERVER_PASSWORD:-$ADMIN_PASSWORD}" 22 && return 0
   try_connection_candidate "HQ-CLI" "$HQ_CLI_IP" "$SSH_REMOTE_USER" "${HQ_CLI_ANSIBLE_PASSWORD:-$ADMIN_PASSWORD}" 22 && return 0
 
   return 1
@@ -998,6 +1000,7 @@ sql_root() {
 }
 
 setup_hq_web() {
+  local web_src index_src logo_src web_password
   install_packages apache2 mariadb-server php php-mysql php-cli php-gd libapache2-mod-php curl
   service_restart_enable mariadb
   local admin_sql_password
@@ -1008,14 +1011,17 @@ setup_hq_web() {
   sql_root "CREATE USER IF NOT EXISTS 'user'@'localhost' IDENTIFIED BY '$admin_sql_password';"
   sql_root "GRANT ALL PRIVILEGES ON webdb.* TO 'user'@'localhost'; FLUSH PRIVILEGES;"
   prepare_additional_workspace || { log_error "Additional ISO is required for HQ web files"; return 1; }
-  [ -d "$ADDITIONAL_WORKDIR/web" ] || { log_error "Web directory not found in Additional workspace: $ADDITIONAL_WORKDIR/web"; return 1; }
-  [ -f "$ADDITIONAL_WORKDIR/web/dump.sql" ] && { mariadb -u root webdb < "$ADDITIONAL_WORKDIR/web/dump.sql" || mysql -u root webdb < "$ADDITIONAL_WORKDIR/web/dump.sql" || true; }
+  web_src="$ADDITIONAL_WORKDIR/web"
+  index_src="$web_src/index.php"
+  logo_src="$web_src/logo.png"
+  [ -d "$web_src" ] || { log_error "Web directory not found in Additional workspace: $web_src"; return 1; }
+  [ -s "$index_src" ] || { log_error "Required web file not found or empty: $index_src"; return 1; }
+  [ -f "$web_src/dump.sql" ] && { mariadb -u root webdb < "$web_src/dump.sql" || mysql -u root webdb < "$web_src/dump.sql" || true; }
   backup_file /var/www/html/index.php
-  [ -f "$ADDITIONAL_WORKDIR/web/index.php" ] && cp "$ADDITIONAL_WORKDIR/web/index.php" /var/www/html/index.php
+  cp "$index_src" /var/www/html/index.php
   mkdir -p /var/www/html/images
-  [ -f "$ADDITIONAL_WORKDIR/web/logo.png" ] && cp "$ADDITIONAL_WORKDIR/web/logo.png" /var/www/html/images/logo.png
+  [ -f "$logo_src" ] && cp "$logo_src" /var/www/html/images/logo.png
   if [ -s /var/www/html/index.php ]; then
-    local web_password
     web_password="$(php_double_quoted_escape "$ADMIN_PASSWORD")"
     web_password="$(sed_replacement_escape "$web_password")"
     sed -i -E 's/\$servername *= *"[^"]*";/\$servername = "localhost";/' /var/www/html/index.php || true
@@ -1024,18 +1030,31 @@ setup_hq_web() {
     sed -i -E 's/\$dbname *= *"[^"]*";/\$dbname = "webdb";/' /var/www/html/index.php || true
   fi
   [ -f /var/www/html/index.html ] && mv /var/www/html/index.html /var/www/html/index.html.backup
+  [ -f /var/www/html/index.apache2-debian.html ] && mv /var/www/html/index.apache2-debian.html /var/www/html/index.apache2-debian.html.backup
+  [ -f /etc/apache2/mods-available/dir.conf ] && {
+    backup_file /etc/apache2/mods-available/dir.conf
+    sed -i 's/DirectoryIndex .*/DirectoryIndex index.php index.html index.cgi index.pl index.xhtml index.htm/' /etc/apache2/mods-available/dir.conf
+  }
   if [ -f /etc/apache2/mods-enabled/dir.conf ]; then
     backup_file /etc/apache2/mods-enabled/dir.conf
     sed -i 's/DirectoryIndex .*/DirectoryIndex index.php index.html index.cgi index.pl index.xhtml index.htm/' /etc/apache2/mods-enabled/dir.conf
   fi
-  command_exists a2enmod && a2enmod rewrite >/dev/null 2>&1 || true
+  if command_exists a2enmod; then
+    a2enmod rewrite >/dev/null 2>&1 || true
+    a2enmod php* >/dev/null 2>&1 || true
+  fi
   chown -R www-data:www-data /var/www/html
   chmod -R 755 /var/www/html
   service_restart_enable apache2
-  if wait_for_check 12 5 "curl -fsS http://127.0.0.1/"; then
+  if [ ! -s /var/www/html/index.php ]; then
+    log_error "HQ web application index.php was not deployed"
+    return 1
+  fi
+  if wait_for_check 12 5 "! curl -fsS http://127.0.0.1/ | grep -q 'Apache2 Debian Default Page'"; then
     log_ok "Web app answers on HQ-SRV"
   else
-    log_warn "Web app did not answer on HQ-SRV yet"
+    log_error "Apache still serves the default page on HQ-SRV"
+    return 1
   fi
 }
 
@@ -1115,7 +1134,7 @@ setup_samba_dc() {
   for user in hquser1 hquser2 hquser3 hquser4 hquser5; do
     samba-tool group addmembers hq "$user" 2>/dev/null || true
   done
-  setup_import_users_from_csv
+  log_skip "CSV domain user import is deferred to Module 3"
 }
 
 setup_ansible_br_srv() {
