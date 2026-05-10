@@ -33,8 +33,8 @@ configure_hq_rtr_chrony() {
       ;;
   esac
 
-  apt_update_safe
-  apt_install_safe chrony >/dev/null 2>&1
+  DEBIAN_FRONTEND=noninteractive apt-get update -y >/dev/null 2>&1
+  DEBIAN_FRONTEND=noninteractive apt-get install -y chrony >/dev/null 2>&1
 
   if ! command -v chronyc >/dev/null 2>&1; then
     log_fail "chrony install failed on HQ-RTR"

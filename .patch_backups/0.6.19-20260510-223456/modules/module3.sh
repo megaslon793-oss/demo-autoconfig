@@ -79,8 +79,8 @@ info() { echo "$(date '+%F %T') [INFO] $*" | tee -a "$LOG_FILE"; }
 cmd_exists() { command -v "$1" >/dev/null 2>&1; }
 
 apt_install() {
-  apt_update_safe
-  apt_install_safe "$@"
+  DEBIAN_FRONTEND=noninteractive apt-get update -y >/dev/null 2>&1
+  DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"
 }
 
 ensure_project_in_opt() {

@@ -31,8 +31,8 @@ case "$ROLE" in
     ;;
 esac
 
-apt_update_safe
-apt_install_safe ansible sshpass openssh-client >/dev/null 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get update -y >/dev/null 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y ansible sshpass openssh-client >/dev/null 2>&1
 
 if command -v ansible >/dev/null 2>&1 && command -v sshpass >/dev/null 2>&1; then
   log_ok "ansible and sshpass installed"
