@@ -1356,13 +1356,8 @@ setup_hq_cli_domain_nfs() {
   printf 'krb5-config krb5-config/kerberos_servers string br-srv.%s\n' "$DOMAIN_LOWER" | debconf-set-selections 2>/dev/null || true
   printf 'krb5-config krb5-config/admin_server string br-srv.%s\n' "$DOMAIN_LOWER" | debconf-set-selections 2>/dev/null || true
   install_packages openssh-server realmd sssd sssd-tools libnss-sss libpam-sss adcli samba-common samba-common-bin packagekit krb5-user nfs-common oddjob oddjob-mkhomedir dnsutils curl
-  backup_file /etc/resolv.conf
-  cat > /etc/resolv.conf <<EOF
-search $DOMAIN_LOWER
-domain $DOMAIN_LOWER
-nameserver $BR_SRV_IP
-nameserver $HQ_SRV_IP
-EOF
+  # Keep DNS order stable: HQ-SRV first, BR-SRV second; localhost only where valid by role.
+  configure_resolv_conf
   enable_service_any ssh sshd
   restart_service_any ssh sshd
   realm discover "$DOMAIN_LOWER" >/dev/null 2>&1 || true

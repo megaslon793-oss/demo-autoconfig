@@ -64,44 +64,97 @@ configure_hosts() {
   log_ok "/etc/hosts configured"
 }
 
-configure_resolv_conf() {
-  if [ "${LOCK_RESOLV_CONF:-no}" = "yes" ] && command_exists chattr; then
-    chattr -i /etc/resolv.conf 2>/dev/null || true
-  fi
-  backup_file /etc/resolv.conf
+_resolv_nameservers_for_role() {
+  local role="${ROLE:-}"
+  local hq_dns="${HQ_SRV_IP:-192.168.100.2}"
+  local br_dns="${BR_SRV_IP:-192.168.255.2}"
+  local external_dns="${EXTERNAL_DNS_SERVERS:-8.8.8.8}"
+
+  case "$role" in
+    HQ-SRV|hq-srv)
+      # HQ-SRV is the main Bind9 DNS server, so localhost is valid here.
+      printf '%s
+' "127.0.0.1"
+      for dns in $external_dns; do printf '%s
+' "$dns"; done
+      ;;
+    BR-SRV|br-srv)
+      # BR-SRV may be Samba DC/DNS. Use localhost only when samba-ad-dc is really active.
+      if systemctl is-active --quiet samba-ad-dc 2>/dev/null; then
+        printf '%s
+' "127.0.0.1"
+        printf '%s
+' "$hq_dns"
+      else
+        printf '%s
+' "$br_dns"
+        printf '%s
+' "$hq_dns"
+        for dns in $external_dns; do printf '%s
+' "$dns"; done
+      fi
+      ;;
+    *)
+      # All other nodes must NOT use localhost as DNS.
+      printf '%s
+' "$hq_dns"
+      printf '%s
+' "$br_dns"
+      for dns in $external_dns; do printf '%s
+' "$dns"; done
+      ;;
+  esac
+}
+
+write_resolv_conf_for_role() {
+  local target="/etc/resolv.conf"
+  local tmp
+  tmp="$(mktemp)"
+
   {
-    [ -n "${DOMAIN:-}" ] && printf 'search %s\n' "$DOMAIN"
-    [ -n "${RESOLV_OPTIONS:-timeout:2 attempts:3}" ] && printf 'options %s\n' "${RESOLV_OPTIONS:-timeout:2 attempts:3}"
+    [ -n "${DOMAIN:-}" ] && printf 'search %s
+' "$DOMAIN"
+    printf 'options %s
+' "${RESOLV_OPTIONS:-timeout:2 attempts:3}"
+
     local dns seen_dns=" "
-    local dns_servers="${DNS_SERVERS:-}"
-    case "${ROLE:-}" in
-      ISP)
-        dns_servers="8.8.8.8 77.88.8.8 $dns_servers"
-        ;;
-      HQ-SRV)
-        if { systemctl is-active --quiet bind9 2>/dev/null || systemctl is-active --quiet named 2>/dev/null; }; then
-          dns_servers="127.0.0.1 192.168.100.2 $dns_servers 8.8.8.8"
-        else
-          dns_servers="8.8.8.8 77.88.8.8 $dns_servers 127.0.0.1 192.168.100.2"
-        fi
-        ;;
-      *)
-        dns_servers="192.168.100.2 $dns_servers"
-        ;;
-    esac
-    for dns in $dns_servers; do
+    # Role-based DNS first, then optional DNS_SERVERS from config as fallback/extension.
+    for dns in $(_resolv_nameservers_for_role) ${DNS_SERVERS:-}; do
+      [ -z "$dns" ] && continue
       case "$seen_dns" in
         *" $dns "*) continue ;;
       esac
-      printf 'nameserver %s\n' "$dns"
+      printf 'nameserver %s
+' "$dns"
       seen_dns="$seen_dns$dns "
     done
-  } > /etc/resolv.conf
-  if [ "${LOCK_RESOLV_CONF:-no}" = "yes" ] && command_exists chattr; then
-    chattr +i /etc/resolv.conf || log_warn "Could not lock /etc/resolv.conf with chattr +i"
+  } > "$tmp"
+
+  if [ -f "$target" ] && cmp -s "$tmp" "$target"; then
+    rm -f "$tmp"
+    log_skip "/etc/resolv.conf already correct for role ${ROLE:-unknown}"
+    return 0
   fi
-  log_ok "/etc/resolv.conf configured"
+
+  if [ "${LOCK_RESOLV_CONF:-no}" = "yes" ] && command_exists chattr; then
+    chattr -i "$target" 2>/dev/null || true
+  fi
+
+  backup_file "$target"
+  cat "$tmp" > "$target"
+  rm -f "$tmp"
+
+  if [ "${LOCK_RESOLV_CONF:-no}" = "yes" ] && command_exists chattr; then
+    chattr +i "$target" || log_warn "Could not lock /etc/resolv.conf with chattr +i"
+  fi
+
+  log_ok "/etc/resolv.conf configured for role ${ROLE:-unknown}"
 }
+
+configure_resolv_conf() {
+  write_resolv_conf_for_role
+}
+
 
 render_interfaces_file() {
   local tmp="$1"
