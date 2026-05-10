@@ -1,9 +1,3 @@
-if [ -f /opt/demo-autoconfig/modules/ssh_ports_ansible_fix.sh ]; then
-  bash /opt/demo-autoconfig/modules/ssh_ports_ansible_fix.sh
-elif [ -f "$(dirname "$0")/ssh_ports_ansible_fix.sh" ]; then
-  bash "$(dirname "$0")/ssh_ports_ansible_fix.sh"
-fi
-
 #!/usr/bin/env bash
 set -Eeuo pipefail
 

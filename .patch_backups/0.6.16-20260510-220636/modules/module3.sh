@@ -1,9 +1,3 @@
-if [ -f /opt/demo-autoconfig/modules/ssh_ports_ansible_fix.sh ]; then
-  bash /opt/demo-autoconfig/modules/ssh_ports_ansible_fix.sh
-elif [ -f "$(dirname "$0")/ssh_ports_ansible_fix.sh" ]; then
-  bash "$(dirname "$0")/ssh_ports_ansible_fix.sh"
-fi
-
 #!/bin/bash
 # Module 3 fixpack: ISP orchestration + package install + basic auto configuration
 # Version: 0.6.11-module3-isp-fixpack
