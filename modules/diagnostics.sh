@@ -1,111 +1,63 @@
-#!/usr/bin/env bash
-set -Eeuo pipefail
+#!/bin/bash
+CONFIG_FILE="${CONFIG_FILE:-/etc/demo-autoconfig/config.env}"
+[ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
 
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-export PROJECT_DIR
-# shellcheck source=../lib/common.sh
-. "$PROJECT_DIR/lib/common.sh"
+ROLE="${ROLE:-$(hostname -s)}"
+DOMAIN="${DOMAIN:-au-team.irpo}"
+HQ_SRV_IP="${HQ_SRV_IP:-192.168.100.2}"
+BR_SRV_IP="${BR_SRV_IP:-192.168.255.2}"
 
-require_root
-ensure_dirs
-load_config
+ok=0; warn=0; fail=0
+OK(){ echo "[OK]   $*"; ok=$((ok+1)); }
+WARN(){ echo "[WARN] $*"; warn=$((warn+1)); }
+FAIL(){ echo "[FAIL] $*"; fail=$((fail+1)); }
 
-section() {
-  printf '\n===== %s =====\n' "$1" | tee -a "$LOG_FILE"
-}
+echo "===== DIAGNOSTICS role=$ROLE host=$(hostname -f 2>/dev/null || hostname) ====="
 
-run_diag() {
-  local title="$1"; shift
-  section "$title"
-  "$@" 2>&1 | tee -a "$LOG_FILE" || log_warn "Diagnostic failed: $title"
-}
+echo "--- DNS ---"
+cat /etc/resolv.conf
+nslookup hq-srv.$DOMAIN >/dev/null 2>&1 && OK "hq-srv resolves" || FAIL "hq-srv does not resolve"
+nslookup br-srv.$DOMAIN >/dev/null 2>&1 && OK "br-srv resolves" || FAIL "br-srv does not resolve"
+nslookup web.$DOMAIN >/dev/null 2>&1 && OK "web resolves" || FAIL "web does not resolve"
+nslookup docker.$DOMAIN >/dev/null 2>&1 && OK "docker resolves" || FAIL "docker does not resolve"
 
-run_diag "ip a" ip a
-run_diag "ip route" ip route
+echo "--- Network ---"
+ip route | grep -q '^default' && OK "default route exists" || WARN "default route missing"
+ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1 && OK "internet IP ping works" || WARN "internet IP ping failed"
 
-[ -n "${DEFAULT_GW:-}" ] && run_diag "ping gateway $DEFAULT_GW" ping -c 3 -W 2 "$DEFAULT_GW" || log_skip "DEFAULT_GW is empty"
-[ -n "${INTERNET_TEST_IP:-}" ] && run_diag "ping internet IP $INTERNET_TEST_IP" ping -c 3 -W 2 "$INTERNET_TEST_IP" || log_skip "INTERNET_TEST_IP is empty"
-
-if command_exists dig; then
-  first_dns_name="${DOMAIN:-example.com}"
-  run_diag "DNS lookup $first_dns_name" dig "$first_dns_name"
-elif command_exists getent; then
-  run_diag "DNS lookup ${DOMAIN:-example.com}" getent hosts "${DOMAIN:-example.com}"
-else
-  log_skip "DNS lookup tools not found"
-fi
-
-if command_exists nslookup && [ -n "${DOMAIN:-}" ]; then
-  dns_check_server="${DNS_CHECK_SERVER:-192.168.100.2}"
-  [ "${ROLE:-}" = "HQ-SRV" ] && dns_check_server="${DNS_CHECK_SERVER:-127.0.0.1}"
-  run_diag "nslookup ${DOMAIN} via ${dns_check_server}" nslookup "$DOMAIN" "$dns_check_server"
-  run_diag "nslookup hq-srv.${DOMAIN} via ${dns_check_server}" nslookup "hq-srv.$DOMAIN" "$dns_check_server"
-fi
-
-
-section "DNS / resolv.conf role check"
-run_diag "cat /etc/resolv.conf" cat /etc/resolv.conf
-if grep -q '^nameserver 127\.0\.0\.1' /etc/resolv.conf; then
-  if [ "${ROLE:-}" = "HQ-SRV" ] && { systemctl is-active --quiet bind9 2>/dev/null || systemctl is-active --quiet named 2>/dev/null; }; then
-    log_ok "localhost DNS is valid on HQ-SRV because bind9/named is active"
-  elif [ "${ROLE:-}" = "BR-SRV" ] && systemctl is-active --quiet samba-ad-dc 2>/dev/null; then
-    log_ok "localhost DNS is valid on BR-SRV because samba-ad-dc is active"
-  else
-    log_error "localhost DNS configured but local DNS service is inactive for role ${ROLE:-unknown}"
-  fi
-else
-  log_ok "localhost is not used as primary DNS on this role"
-fi
-
-if command_exists nslookup; then
-  run_diag "external DNS google.com" nslookup google.com
-  run_diag "internal DNS hq-srv.${DOMAIN:-au-team.irpo}" nslookup "hq-srv.${DOMAIN:-au-team.irpo}" "${HQ_SRV_IP:-192.168.100.2}"
-  run_diag "internal DNS br-srv.${DOMAIN:-au-team.irpo}" nslookup "br-srv.${DOMAIN:-au-team.irpo}" "${HQ_SRV_IP:-192.168.100.2}"
-else
-  log_warn "nslookup not installed; install dnsutils/bind9-dnsutils"
-fi
-
-if [ "${GRE_ENABLE:-no}" = "yes" ]; then
-  run_diag "GRE link ${GRE_NAME:-gre1}" ip -d link show "${GRE_NAME:-gre1}"
-else
-  log_skip "GRE disabled by config"
-fi
-
-if command_exists vtysh; then
-  run_diag "show ip ospf neighbor" vtysh -c "show ip ospf neighbor"
-else
-  log_skip "vtysh not installed"
-fi
-
-for svc in ssh frr isc-dhcp-server bind9 samba-ad-dc smbd nmbd winbind chrony docker apache2 mariadb nginx cups rsyslog fail2ban; do
-  if systemctl list-unit-files "$svc.service" >/dev/null 2>&1; then
-    run_diag "systemctl status $svc" systemctl --no-pager --full status "$svc"
-  else
-    log_skip "Service not found: $svc"
-  fi
-done
-
-command_exists docker && run_diag "docker ps" docker ps || log_skip "docker not installed"
-command_exists docker && run_diag "docker images" docker images || true
-
-command_exists samba-tool && run_diag "samba-tool domain info" samba-tool domain info 127.0.0.1 || log_skip "samba-tool not installed"
-command_exists klist && run_diag "klist" klist || log_skip "klist not installed"
-command_exists smbclient && run_diag "smbclient check" smbclient -L localhost -N || log_skip "smbclient not installed"
-command_exists exportfs && run_diag "exportfs -v" exportfs -v || log_skip "exportfs not installed"
-command_exists chronyc && run_diag "chronyc sources" chronyc sources || log_skip "chronyc not installed"
-command_exists lpstat && run_diag "lpstat" lpstat -t || log_skip "lpstat not installed"
-
-case "${ROLE:-}" in
-  HQ-SRV|BR-SRV)
-    run_diag "user ${SSH_USER:-sshuser}" id "${SSH_USER:-sshuser}"
-    run_diag "user ${SSH_REMOTE_USER:-user}" id "${SSH_REMOTE_USER:-user}"
+case "$ROLE" in
+  ISP|isp)
+    systemctl is-active --quiet nginx && OK "nginx active" || FAIL "nginx inactive"
+    curl -I --max-time 5 http://web.$DOMAIN 2>/dev/null | grep -Eq '401|200|30' && OK "HTTP web proxy answers" || FAIL "HTTP web proxy broken"
+    curl --max-time 5 http://docker.$DOMAIN 2>/dev/null | grep -q . && OK "HTTP docker proxy answers GET" || FAIL "HTTP docker proxy broken"
+    curl -k -I --max-time 5 https://web.$DOMAIN 2>/dev/null | grep -Eq '401|200|30' && OK "HTTPS web proxy answers" || WARN "HTTPS web proxy not ready"
+    curl -k --max-time 5 https://docker.$DOMAIN 2>/dev/null | grep -q . && OK "HTTPS docker proxy answers GET" || WARN "HTTPS docker proxy not ready"
     ;;
-  HQ-RTR|BR-RTR)
-    run_diag "user ${SSH_ROUTER_EXTRA_USER:-user}" id "${SSH_ROUTER_EXTRA_USER:-user}"
-    run_diag "user ${SSH_ROUTER_USER:-net_admin}" id "${SSH_ROUTER_USER:-net_admin}"
+  HQ-RTR|hq-rtr|BR-RTR|br-rtr)
+    command -v ipsec >/dev/null 2>&1 && OK "ipsec command exists" || FAIL "ipsec command missing"
+    systemctl is-active --quiet strongswan-starter && OK "strongswan-starter active" || WARN "strongswan-starter inactive/missing"
+    ip xfrm state 2>/dev/null | grep -q . && OK "xfrm state exists" || FAIL "xfrm state empty"
+    /usr/sbin/iptables -L -n >/dev/null 2>&1 && OK "iptables works" || FAIL "iptables missing/broken"
+    ;;
+  BR-SRV|br-srv)
+    systemctl is-active --quiet samba-ad-dc && OK "samba-ad-dc active" || FAIL "samba-ad-dc inactive"
+    count="$(samba-tool user list 2>/dev/null | wc -l)"
+    echo "Samba users count: $count"
+    [ "$count" -ge 20 ] && OK "users imported" || FAIL "users not imported enough"
+    [ -f /mnt/additional/Users.csv ] && OK "Users.csv exists" || FAIL "Users.csv missing"
+    ;;
+  HQ-SRV|hq-srv)
+    systemctl is-active --quiet bind9 || systemctl is-active --quiet named
+    [ $? -eq 0 ] && OK "bind9/named active" || FAIL "bind9/named inactive"
+    systemctl is-active --quiet cups && OK "cups active" || WARN "cups inactive"
+    systemctl is-active --quiet fail2ban && OK "fail2ban active" || WARN "fail2ban inactive"
+    ;;
+  HQ-CLI|hq-cli)
+    lpstat -d >/dev/null 2>&1 && OK "default printer configured" || WARN "default printer not configured"
+    curl -I --max-time 5 http://web.$DOMAIN 2>/dev/null | grep -Eq '401|200|30' && OK "client sees web" || FAIL "client cannot see web"
+    curl --max-time 5 http://docker.$DOMAIN 2>/dev/null | grep -q . && OK "client sees docker" || FAIL "client cannot see docker"
     ;;
 esac
 
-[ -n "${SSH_PORT:-}" ] && command_exists ss && run_diag "ssh listen port ${SSH_PORT:-}" sh -c "ss -ltn | grep ':${SSH_PORT:-} '" || true
-
-log_ok "Diagnostics finished"
+echo "===== SUMMARY OK=$ok WARN=$warn FAIL=$fail ====="
+[ "$fail" -eq 0 ]

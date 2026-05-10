@@ -1,110 +1,78 @@
-#!/usr/bin/env bash
-set -Eeuo pipefail
+#!/bin/bash
+set -u
 
-PROJECT_NAME="demo-autoconfig"
-TMP_ROOT="/tmp/demo-autoconfig"
-LOG_FILE="/var/log/demo-autoconfig.log"
+DEFAULT_REPO_ARCHIVE_URL="https://github.com/megaslon793-oss/demo-autoconfig/archive/refs/heads/main.tar.gz"
+REPO_ARCHIVE_URL="${DEMO_REPO_ARCHIVE_URL:-$DEFAULT_REPO_ARCHIVE_URL}"
 
-DEFAULT_ARCHIVE_URL="https://codeload.github.com/megaslon793-oss/demo-autoconfig/tar.gz/refs/heads/main"
-ARCHIVE_URL="${DEMO_REPO_ARCHIVE_URL:-$DEFAULT_ARCHIVE_URL}"
-FALLBACK_ARCHIVE_URL="https://github.com/megaslon793-oss/demo-autoconfig/archive/refs/heads/main.tar.gz"
-DOWNLOAD_RETRIES="${DEMO_DOWNLOAD_RETRIES:-12}"
-DOWNLOAD_WAIT="${DEMO_DOWNLOAD_WAIT:-3}"
-DOWNLOAD_TIMEOUT="${DEMO_DOWNLOAD_TIMEOUT:-25}"
+TMP_DIR="/tmp/demo-autoconfig"
+ARCHIVE_PATH="$TMP_DIR/project.tar.gz"
+OPT_DIR="/opt/demo-autoconfig"
 
-status() {
-  local level="$1"; shift
-  printf '[%s] %s\n' "$level" "$*" >&2
-  if [ "$(id -u)" -eq 0 ]; then
-    { printf '%s [%s] %s\n' "$(date '+%F %T')" "$level" "$*"; } >> "$LOG_FILE" || true
-  fi
-}
+ok() { echo "[OK] $*"; }
+warn() { echo "[WARN] $*"; }
+err() { echo "[ERROR] $*" >&2; }
 
-need_root() {
-  if [ "$(id -u)" -ne 0 ]; then
-    status ERROR "Run as root. For pipe install use: curl -fsSL URL | sudo bash"
-    exit 1
-  fi
-}
+if [ "$(id -u)" -ne 0 ]; then
+  err "Run as root: sudo bash bootstrap.sh"
+  exit 1
+fi
 
-download_project() {
-  mkdir -p "$TMP_ROOT"
-  local archive="$TMP_ROOT/project.tar.gz"
-  local extract="$TMP_ROOT/extract"
-  rm -rf "$extract"
-  mkdir -p "$extract"
+mkdir -p "$TMP_DIR"
 
-  status OK "Downloading project archive"
-  local urls="$ARCHIVE_URL"
-  [ "$ARCHIVE_URL" = "$FALLBACK_ARCHIVE_URL" ] || urls="$urls $FALLBACK_ARCHIVE_URL"
-  local url downloaded="no"
-  for url in $urls; do
-    status OK "Trying: $url"
-    if download_url "$url" "$archive"; then
-      downloaded="yes"
-      break
-    fi
-  done
-  if [ "$downloaded" != "yes" ] || [ ! -s "$archive" ]; then
-    status ERROR "Download failed. Check internet, DNS, TLS certificates, proxy, or use offline copy."
-    exit 1
-  fi
-  tar -xzf "$archive" -C "$extract"
-
-  local project_dir
-  project_dir="$(find "$extract" -maxdepth 2 -type f -name menu.sh -printf '%h\n' | head -n 1)"
-  if [ -z "$project_dir" ]; then
-    status ERROR "menu.sh not found in archive."
-    exit 1
-  fi
-
-  chmod +x "$project_dir/menu.sh" "$project_dir"/modules/*.sh 2>/dev/null || true
-  echo "$project_dir"
-}
-
-download_url() {
-  local url="$1"
-  local output="$2"
-  rm -f "$output"
+download_archive() {
   if command -v curl >/dev/null 2>&1; then
-    curl -4 -fL \
-      --connect-timeout "$DOWNLOAD_TIMEOUT" \
-      --max-time 300 \
-      --retry "$DOWNLOAD_RETRIES" \
-      --retry-delay "$DOWNLOAD_WAIT" \
-      --retry-connrefused \
-      "$url" -o "$output" && return 0
-  elif command -v wget >/dev/null 2>&1; then
-    wget -4 \
-      --tries="$DOWNLOAD_RETRIES" \
-      --waitretry="$DOWNLOAD_WAIT" \
-      --timeout="$DOWNLOAD_TIMEOUT" \
-      --dns-timeout="$DOWNLOAD_TIMEOUT" \
-      --connect-timeout="$DOWNLOAD_TIMEOUT" \
-      --read-timeout=120 \
-      -O "$output" "$url" && return 0
-  else
-    status ERROR "Neither curl nor wget is installed."
-    exit 1
+    curl -4 -fL --connect-timeout 10 --max-time 90 --retry 5 --retry-delay 3 -o "$ARCHIVE_PATH" "$REPO_ARCHIVE_URL"
+    return $?
   fi
-  rm -f "$output"
+  if command -v wget >/dev/null 2>&1; then
+    wget -4 --timeout=20 --tries=5 -O "$ARCHIVE_PATH" "$REPO_ARCHIVE_URL"
+    return $?
+  fi
   return 1
 }
 
-main() {
-  need_root "$@"
-  mkdir -p "$(dirname "$LOG_FILE")" "$TMP_ROOT"
-  touch "$LOG_FILE"
-
-  local project_dir="${DEMO_PROJECT_DIR:-}"
-  if [ -n "$project_dir" ] && [ -f "$project_dir/menu.sh" ]; then
-    status OK "Using local project directory: $project_dir"
-  else
-    project_dir="$(download_project)"
+extract_to_opt() {
+  rm -rf "$TMP_DIR/extract"
+  mkdir -p "$TMP_DIR/extract"
+  tar -xzf "$ARCHIVE_PATH" -C "$TMP_DIR/extract" || return 1
+  src_dir="$(find "$TMP_DIR/extract" -maxdepth 1 -type d -name 'demo-autoconfig-*' | head -n 1)"
+  [ -n "$src_dir" ] || src_dir="$(find "$TMP_DIR/extract" -maxdepth 1 -type d | tail -n 1)"
+  if [ ! -f "$src_dir/menu.sh" ]; then
+    err "menu.sh not found in archive"
+    return 1
   fi
-
-  status OK "Starting menu"
-  DEMO_BOOTSTRAP_TMP="$TMP_ROOT" bash "$project_dir/menu.sh"
+  mkdir -p "$OPT_DIR"
+  cp -a "$src_dir"/. "$OPT_DIR"/
+  chmod +x "$OPT_DIR"/bootstrap.sh "$OPT_DIR"/menu.sh "$OPT_DIR"/modules/*.sh 2>/dev/null || true
+  ok "Project saved to $OPT_DIR"
 }
 
-main "$@"
+offline_fallback() {
+  if [ -f "$OPT_DIR/menu.sh" ]; then
+    warn "Using local copy: $OPT_DIR"
+    return 0
+  fi
+  for local_archive in /mnt/additional/demo-autoconfig.tar.gz /mnt/additional/demo-autoconfig-module3.tar.gz /tmp/demo-autoconfig.tar.gz; do
+    if [ -f "$local_archive" ]; then
+      warn "Using local archive: $local_archive"
+      cp "$local_archive" "$ARCHIVE_PATH"
+      extract_to_opt && return 0
+    fi
+  done
+  return 1
+}
+
+if download_archive; then
+  ok "Downloaded project archive from $REPO_ARCHIVE_URL"
+  extract_to_opt || { warn "Archive extract failed"; offline_fallback || exit 1; }
+else
+  warn "Could not download project archive"
+  offline_fallback || { err "No internet archive and no local copy found"; exit 1; }
+fi
+
+if [ -f "$OPT_DIR/menu.sh" ]; then
+  bash "$OPT_DIR/menu.sh"
+else
+  err "menu.sh not found in $OPT_DIR"
+  exit 1
+fi
