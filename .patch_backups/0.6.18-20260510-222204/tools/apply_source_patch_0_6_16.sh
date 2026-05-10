@@ -14,7 +14,7 @@ patch_file(){
   sed -i \
     -e 's/SSH_ROUTER_PORT="${SSH_ROUTER_PORT:-22}"/SSH_ROUTER_PORT="${SSH_ROUTER_PORT:-22}"/g' \
     -e 's/SSH_ROUTER_PORT=22/SSH_ROUTER_PORT=22/g' \
-    -e 's/Router SSH port \[22\]/Router SSH port [22]/g' \
+    -e 's/Router SSH port \[2026\]/Router SSH port [22]/g' \
     -e 's/ansible_port=22 ansible_user=net_admin/ansible_port=22 ansible_user=net_admin/g' \
     -e 's/HQ_CLI_ANSIBLE_PORT=22/HQ_CLI_ANSIBLE_PORT=22/g' \
     "$f"

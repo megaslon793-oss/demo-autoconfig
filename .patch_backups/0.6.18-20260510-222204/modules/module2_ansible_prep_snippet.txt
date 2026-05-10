@@ -1,0 +1,6 @@
+# Add this at the beginning of the Ansible block in modules/module2.sh:
+if [ -f /opt/demo-autoconfig/modules/ansible_brsrv_prep.sh ]; then
+  bash /opt/demo-autoconfig/modules/ansible_brsrv_prep.sh
+elif [ -f "$(dirname "$0")/ansible_brsrv_prep.sh" ]; then
+  bash "$(dirname "$0")/ansible_brsrv_prep.sh"
+fi

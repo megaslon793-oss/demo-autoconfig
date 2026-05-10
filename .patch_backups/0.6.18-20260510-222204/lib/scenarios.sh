@@ -89,7 +89,7 @@ set_module1_defaults() {
   SSH_ROUTER_USER="net_admin"
   SSH_ROUTER_PASSWORD="P@ssw0rd"
   SSH_ROUTER_EXTRA_USER="user"
-  SSH_ROUTER_PORT="22"
+  SSH_ROUTER_PORT="2026"
   SSH_CLIENT_CONFIG="no"
   ADMIN_PASSWORD="P@ssw0rd"
   DOCKER_DB_NAME="testdb"

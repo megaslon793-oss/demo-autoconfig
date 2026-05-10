@@ -31,8 +31,8 @@ patch_text_file() {
   backup_file "$f"
 
   # Direct visible prompt fixes.
-  perl -0pi -e 's/Router SSH port \[22\]/Router SSH port [22]/g' "$f"
-  perl -0pi -e 's/(Router SSH port[^\n\r]*\[\s*)22(\s*\])/${1}22${2}/g' "$f"
+  perl -0pi -e 's/Router SSH port \[2026\]/Router SSH port [22]/g' "$f"
+  perl -0pi -e 's/(Router SSH port[^\n\r]*\[\s*)2026(\s*\])/${1}22${2}/g' "$f"
 
   # Variable default fixes.
   perl -0pi -e 's/SSH_ROUTER_PORT="\$\{SSH_ROUTER_PORT:-2026\}"/SSH_ROUTER_PORT="${SSH_ROUTER_PORT:-22}"/g' "$f"
@@ -43,8 +43,8 @@ patch_text_file() {
   # Prompt functions often look like:
   # prompt "Router SSH port" "22" ...
   # ask_value "Router SSH port" SSH_ROUTER_PORT "22"
-  perl -0pi -e 's/(Router SSH port["'\''][,\)\s]+["'\''])22(["'\''])/${1}22${2}/g' "$f"
-  perl -0pi -e 's/(Router SSH port[^;\n\r]*SSH_ROUTER_PORT[^;\n\r]*["'\''])22(["'\''])/${1}22${2}/g' "$f"
+  perl -0pi -e 's/(Router SSH port["'\''][,\)\s]+["'\''])2026(["'\''])/${1}22${2}/g' "$f"
+  perl -0pi -e 's/(Router SSH port[^;\n\r]*SSH_ROUTER_PORT[^;\n\r]*["'\''])2026(["'\''])/${1}22${2}/g' "$f"
 
   # Ansible router ports should be 22.
   perl -0pi -e 's/(ansible_user=(?:net_admin|\$\{SSH_ROUTER_USER\}|"\$SSH_ROUTER_USER")[^\n\r]*ansible_port=)2026/${1}22/g' "$f"

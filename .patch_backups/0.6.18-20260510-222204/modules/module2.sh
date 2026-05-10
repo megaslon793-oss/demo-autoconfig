@@ -1,9 +1,3 @@
-if [ -f /opt/demo-autoconfig/modules/router_ssh_22_runtime_guard.sh ]; then
-  bash /opt/demo-autoconfig/modules/router_ssh_22_runtime_guard.sh
-elif [ -f "$(dirname "$0")/router_ssh_22_runtime_guard.sh" ]; then
-  bash "$(dirname "$0")/router_ssh_22_runtime_guard.sh"
-fi
-
 if [ -f /opt/demo-autoconfig/modules/router_ssh_port_22_fix.sh ]; then
   bash /opt/demo-autoconfig/modules/router_ssh_port_22_fix.sh
 elif [ -f "$(dirname "$0")/router_ssh_port_22_fix.sh" ]; then
