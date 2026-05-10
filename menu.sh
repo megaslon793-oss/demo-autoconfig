@@ -29,19 +29,7 @@ cat <<'BANNER'
 #        demo-autoconfig :: by megaslon793-oss               #
 #                                                             #
 ###############################################################
-!
-!
-!
-!
-!
-!
-!
-!
-!
-!
-!
-!
-!
+
 
 BANNER
 
@@ -52,6 +40,15 @@ show_goida_banner
 
 show_menu() {
   cat <<'MENU'
+
+
+
+
+
+
+
+
+
 
 demo-autoconfig
 version: VERSION_PLACEHOLDER
