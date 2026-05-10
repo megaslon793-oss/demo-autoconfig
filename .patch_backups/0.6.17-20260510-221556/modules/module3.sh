@@ -1,9 +1,3 @@
-if [ -f /opt/demo-autoconfig/modules/router_ssh_port_22_fix.sh ]; then
-  bash /opt/demo-autoconfig/modules/router_ssh_port_22_fix.sh
-elif [ -f "$(dirname "$0")/router_ssh_port_22_fix.sh" ]; then
-  bash "$(dirname "$0")/router_ssh_port_22_fix.sh"
-fi
-
 # router_ssh_port_guard_0_6_17
 SSH_ROUTER_PORT="${SSH_ROUTER_PORT:-22}"
 if [ "$SSH_ROUTER_PORT" = "2026" ]; then SSH_ROUTER_PORT="22"; fi

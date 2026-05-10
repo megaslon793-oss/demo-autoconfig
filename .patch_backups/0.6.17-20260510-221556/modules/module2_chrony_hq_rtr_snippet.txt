@@ -1,0 +1,7 @@
+# Add this call in modules/module2.sh at the end of the chrony block.
+# Safe: it runs only when ROLE is HQ-RTR.
+if [ -f /opt/demo-autoconfig/modules/chrony_hq_rtr_fix.sh ]; then
+  bash /opt/demo-autoconfig/modules/chrony_hq_rtr_fix.sh
+elif [ -f "$(dirname "$0")/chrony_hq_rtr_fix.sh" ]; then
+  bash "$(dirname "$0")/chrony_hq_rtr_fix.sh"
+fi
